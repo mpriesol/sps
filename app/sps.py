@@ -16,6 +16,10 @@ class SPSError(Exception):
     pass
 
 
+class CourierCredentialsError(SPSError):
+    pass
+
+
 def normalize_code(value: str) -> str:
     return value.strip().upper()
 
@@ -110,7 +114,7 @@ class SPSClient:
                 self.logged_in = False
                 raise SPSError("Prihlásenie do SPS vypršalo. Obnovte zoznam a potvrďte zostávajúce balíky.")
             if r.status_code == 404:
-                raise SPSError("SPS odmietlo potvrdenie. Skontrolujte kuriéra a jeho heslo.")
+                raise CourierCredentialsError("SPS odmietlo potvrdenie. Vyberte kuriéra a zadajte jeho heslo.")
             if r.status_code in {400, 403, 409, 422, 429}:
                 raise SPSError(f"SPS odmietlo príjem (HTTP {r.status_code}). Skontrolujte zásielku v SPS.")
             raise SPSError(f"SPS nepotvrdilo príjem (HTTP {r.status_code}). Príjem môžete zopakovať.")
@@ -134,5 +138,5 @@ class DemoSPS:
     async def accept(self, number, courier_id, courier_password):
         await asyncio.sleep(0.15)
         if courier_password != "demo":
-            raise SPSError("V demo režime použite heslo kuriéra: demo.")
+            raise CourierCredentialsError("V demo režime použite heslo kuriéra: demo.")
         self.received.add(number)

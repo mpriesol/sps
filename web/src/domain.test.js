@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeCode, classifyScan, remainingItems } from './domain.js';
+import { normalizeCode, classifyScan, remainingItems, coverCrop } from './domain.js';
 
 test('preserves leading zeros and accepts a scanner newline', () => {
   assert.equal(normalizeCode('  001234567890\r\n'), '001234567890');
@@ -18,4 +18,10 @@ test('unknown labels and repeated camera frames do not add another parcel', () =
 test('retry includes failed and pending parcels, leaving confirmed ones complete', () => {
   const selected = new Map([['a', { state: 'accepted' }], ['b', { state: 'failed' }], ['c', { state: 'pending' }]]);
   assert.deepEqual(remainingItems(selected).map(x => x.state), ['failed', 'pending']);
+});
+
+test('portrait camera fills a landscape preview by cropping top and bottom', () => {
+  assert.deepEqual(coverCrop(720, 1280, 360, 240), { x: 0, y: 400, width: 720, height: 480 });
+  assert.deepEqual(coverCrop(1280, 720, 300, 300), { x: 280, y: 0, width: 720, height: 720 });
+  assert.deepEqual(coverCrop(720, 1280, 0, 0), { x: 0, y: 0, width: 720, height: 1280 });
 });

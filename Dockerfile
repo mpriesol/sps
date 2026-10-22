@@ -9,7 +9,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt && useradd --uid 10001 --create-home sps
+RUN pip install --no-cache-dir -r requirements.txt && useradd --uid 10001 --create-home sps && mkdir /app/data && chown sps:sps /app/data
 COPY app/ ./app/
 COPY --from=web /build/dist/ ./web/dist/
 USER sps

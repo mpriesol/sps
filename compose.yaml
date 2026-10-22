@@ -8,6 +8,8 @@ services:
     ports:
       - "127.0.0.1:8081:8080"
     read_only: true
+    volumes:
+      - courier_passwords:/app/data
     tmpfs:
       - /tmp:size=32m
     cap_drop:
@@ -19,3 +21,6 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+
+volumes:
+  courier_passwords:

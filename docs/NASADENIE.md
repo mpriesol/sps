@@ -1,6 +1,6 @@
 # Nasadenie na server
 
-Cieľová adresa: **https://hub.biketrek.sk/sps/**. Aplikácia beží samostatne, Hubu pribudne iba smerovanie `/sps`. Nemá databázu ani trvalý dátový volume.
+Cieľová adresa: **https://hub.biketrek.sk/sps/**. Aplikácia beží samostatne, Hubu pribudne iba smerovanie `/sps`. Nemá databázu. Heslá kuriérov uchováva v trvalom Docker volume `courier_passwords`.
 
 ## 1. Stiahni aplikáciu
 
@@ -141,13 +141,18 @@ Obnov stránku a znovu sa prihlás. Demo označenie zmizne a aplikácia načíta
 
 ## Aktualizácia
 
+Pri prechode z prvej verzie stačí nasledujúci postup. Nový volume s heslami sa vytvorí automaticky; `sps.env` ani Caddyfile netreba meniť.
+
+
 ```bash
 cd /opt/sps
 git pull --ff-only
 docker compose -f compose.yaml -f compose.hub.yaml up -d --build
 ```
 
-Súbor `sps.env` zostáva na serveri. Zastavenie aplikácie: `docker compose -f compose.yaml -f compose.hub.yaml down`. Nevykonávaj aktualizáciu počas rozpracovaného príjmu, pretože dávka sa neukladá.
+Po aktualizácii obnov stránku na mobile a prihlás sa znova. V hornej lište otvor **Kuriéri** a môžeš dopredu uložiť známe heslá; prípadne sa zapamätajú pri prvom úspešnom príjme.
+
+Súbor `sps.env` zostáva na serveri. Heslá kuriérov zostávajú vo volume (zvyčajne `sps_courier_passwords`); pri aktualizácii nepoužívaj `down -v`, ktoré by tento volume vymazalo. Volume zahrň do serverovej zálohy ako citlivé údaje. Súbory sú prístupné iba používateľovi aplikácie a rootovi servera, nie sú šifrované. Zastavenie aplikácie: `docker compose -f compose.yaml -f compose.hub.yaml down`. Nevykonávaj aktualizáciu počas rozpracovaného príjmu, pretože dávka sa neukladá.
 
 ## Ak Caddy beží priamo na serveri
 

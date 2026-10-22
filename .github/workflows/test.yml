@@ -25,3 +25,8 @@ jobs:
         working-directory: web
       - run: python -m pytest -q
       - run: docker build -t sps-receiver:test .
+      - name: Verify password volume with the non-root container user
+        run: |
+          docker run --rm --read-only --tmpfs /tmp -v sps-password-test:/app/data sps-receiver:test python -c "from app.courier_passwords import CourierPasswords; s = CourierPasswords('/app/data/test.json'); s.save({'id': 1, 'code': 'TEST', 'name': 'Test'}, 'test-only')"
+          docker run --rm --read-only --tmpfs /tmp -v sps-password-test:/app/data sps-receiver:test python -c "from app.courier_passwords import CourierPasswords; s = CourierPasswords('/app/data/test.json'); assert s.password(1) == 'test-only'; assert s.path.stat().st_mode & 0o777 == 0o600"
+          docker volume rm sps-password-test

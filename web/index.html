@@ -9,7 +9,7 @@
   <title>Príjem balíkov · SPS</title>
 </head>
 <body>
-  <header class="topbar"><div class="brand"><span class="brand-icon" aria-hidden="true">▣</span><div><strong>Príjem balíkov</strong><span>SPS / výdajné miesto</span></div></div><button id="logout" class="text-button" hidden>Odhlásiť</button></header>
+  <header class="topbar"><div class="brand"><span class="brand-icon" aria-hidden="true">▣</span><strong>Príjem balíkov</strong></div><div class="top-actions"><button id="manage-couriers" class="text-button" hidden>Kuriéri</button><button id="logout" class="text-button" hidden>Odhlásiť</button></div></header>
   <main>
     <section id="login-view" class="login-card card">
       <span class="eyebrow">VÝDAJNÉ MIESTO</span><h1>Balíky prijaté.<br>Za pár skenov.</h1><p class="muted">Prihlás sa a načítaj zásielky fotoaparátom mobilu.</p>
@@ -20,8 +20,6 @@
 
     <section id="work-view" hidden>
       <div id="demo-banner" class="demo-banner" hidden><strong>DEMO</strong> Skúšobné balíky. Nič sa neposiela do SPS.</div>
-      <div class="page-heading"><div><span class="eyebrow">PRÍJEM OD KURIÉRA</span><h1>Naskenuj. Potvrď. Hotovo.</h1></div><button id="refresh" class="secondary compact">Obnoviť</button></div>
-      <div class="steps" aria-label="Postup"><span id="step-scan" class="active">01 <b>Skenovanie</b></span><span id="step-confirm">02 <b>Potvrdenie</b></span><span id="step-done">03 <b>Hotovo</b></span></div>
       <p id="load-error" class="error-box" role="alert" hidden></p>
       <section class="camera-card" aria-label="Čítačka čiarových kódov">
         <div id="camera-preview" class="camera-preview">
@@ -30,20 +28,21 @@
           <div id="scan-frame" class="scan-frame" hidden><span></span></div>
           <span id="live-badge" class="live-badge" hidden>● KAMERA ZAPNUTÁ</span>
         </div>
+        <p id="scan-feedback" class="feedback" role="status" aria-live="polite">Načítavam zoznam zo SPS…</p>
         <div class="camera-controls"><button id="scan" class="primary">Zapnúť skenovanie</button><button id="torch" class="secondary" hidden>Prisvietiť</button></div>
       </section>
-      <p id="scan-feedback" class="feedback" role="status" aria-live="polite">Načítavam zoznam zo SPS…</p>
       <form id="manual-form" class="manual-form"><label class="sr-only" for="manual-code">Číslo zásielky</label><input id="manual-code" placeholder="Alebo zadaj číslo zásielky" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="100"><button class="secondary" id="manual-add" aria-label="Pridať zásielku">Pridať</button></form>
       <button id="demo-add" class="demo-add" hidden>+ Pridať skúšobný balík</button>
-      <section class="card selected-card"><div class="section-title"><h2>Táto dávka <span id="selected-count" class="count-badge">0</span></h2><span id="available-count" class="muted">— v SPS</span></div><div id="empty-selection" class="empty-selection"><span aria-hidden="true">↳</span> Naskenované balíky sa zobrazia tu.</div><ul id="selected-list" class="parcel-list"></ul></section>
+      <section class="card selected-card"><div class="section-title"><h2>Táto dávka <span id="selected-count" class="count-badge">0</span></h2><div class="list-actions"><span id="available-count" class="muted">— v SPS</span><button id="refresh" class="secondary compact">Obnoviť</button></div></div><div id="empty-selection" class="empty-selection"><span aria-hidden="true">↳</span> Naskenované balíky sa zobrazia tu.</div><ul id="selected-list" class="parcel-list"></ul></section>
       <section id="result" class="result card" hidden aria-live="polite"><span class="eyebrow">VÝSLEDOK PRÍJMU</span><h2 id="result-title"></h2><p id="result-text"></p></section>
       <details class="catalog card"><summary>Zoznam zásielok zo SPS <span id="catalog-count">0</span></summary><label class="sr-only" for="search">Hľadať zásielku</label><input id="search" placeholder="Hľadať číslo alebo odosielateľa" type="search"><ul id="catalog-list" class="parcel-list"></ul><p id="catalog-empty" class="muted" hidden>Nenašli sa žiadne zásielky.</p></details>
-      <p class="footnote">Naskenované balíky sa prijmú do SPS až po potvrdení kuriérom.</p>
+      <p class="footnote">Balíky sa odošlú do SPS po stlačení Prijať. Ak má prvý kuriér v zozname uložené heslo, použije sa automaticky.</p>
       <div class="bottom-bar"><div><strong id="bottom-count">0 balíkov</strong><span id="bottom-help">Pripravené na skenovanie</span></div><button id="prepare" class="primary" disabled>Prijať balíky</button><button id="new-receipt" class="primary" hidden>Nový príjem</button></div>
     </section>
   </main>
 
-  <dialog id="confirm-dialog"><form id="confirm-form"><div class="dialog-heading"><span class="eyebrow">POTVRDENIE KURIÉROM</span><h2 id="confirm-title">Prijať balíky</h2><p class="muted">Vyber kuriéra, ktorý zásielky odovzdáva.</p></div><label for="courier">Kuriér</label><select id="courier" required><option value="">Načítavam…</option></select><label for="courier-password">Heslo kuriéra</label><input id="courier-password" type="password" autocomplete="off" required maxlength="1024"><p id="demo-password" class="footnote" hidden>Demo heslo kuriéra: <strong>demo</strong></p><p id="confirm-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-confirm" class="secondary">Späť</button><button id="confirm-submit" class="primary" disabled>Potvrdiť príjem</button></div></form></dialog>
+  <dialog id="confirm-dialog"><form id="confirm-form"><div class="dialog-heading"><h2 id="confirm-title">Prijať balíky</h2><p class="muted">Vyber kuriéra, ktorý zásielky odovzdáva.</p></div><label for="courier">Kuriér</label><select id="courier" required><option value="">Načítavam…</option></select><label for="courier-password">Heslo kuriéra</label><input id="courier-password" type="password" autocomplete="off" required maxlength="1024"><p id="courier-hint" class="footnote">Po úspešnom prijatí si heslo zapamätáme.</p><p id="demo-password" class="footnote" hidden>Demo heslo kuriéra: <strong>demo</strong></p><p id="confirm-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-confirm" class="secondary">Späť</button><button id="confirm-submit" class="primary" disabled>Potvrdiť príjem</button></div></form></dialog>
+  <dialog id="passwords-dialog"><form id="passwords-form"><div class="dialog-heading"><h2>Heslá kuriérov</h2><p class="muted">Uložené heslá sa použijú aj pri príjme z ďalších mobilov.</p></div><label for="managed-courier">Kuriér</label><select id="managed-courier" required></select><p id="manager-hint" class="footnote"></p><label for="managed-password">Nové heslo kuriéra</label><input id="managed-password" type="password" autocomplete="off" required maxlength="1024"><p id="manager-message" class="footnote" role="status" aria-live="polite"></p><button id="forget-courier" type="button" class="secondary compact" disabled>Odstrániť uložené heslo</button><div class="dialog-actions"><button id="close-passwords" type="button" class="secondary">Zavrieť</button><button id="save-courier" class="primary" disabled>Uložiť heslo</button></div></form></dialog>
   <script type="module" src="/src/app.js"></script>
 </body>
 </html>

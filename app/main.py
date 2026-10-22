@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
 from .config import Settings
-from .sps import DemoSPS, SPSClient, SPSError, normalize_code
+from .courier_passwords import CourierPasswords
+from .sps import CourierCredentialsError, DemoSPS, SPSClient, SPSError, normalize_code
 
 COOKIE = "sps_receiving_session"
 
@@ -29,6 +30,14 @@ class NumbersBody(BaseModel):
 class AcceptBody(BaseModel):
     number: str = Field(min_length=1, max_length=100)
     courier_id: str | int
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=1024)
+
+
+class CourierBody(BaseModel):
+    courier_id: str | int
+
+
+class CourierPasswordBody(CourierBody):
     password: SecretStr = Field(min_length=1, max_length=1024)
 
 
@@ -37,6 +46,8 @@ def create_app(settings=None, sps=None, static_dir=None):
     client = sps or (DemoSPS() if cfg.demo else SPSClient(cfg.sps_username, cfg.sps_password))
     sessions, failures = {}, []
     expected_password = hashlib.sha256(cfg.app_password.encode()).digest()
+    account = "demo" if cfg.demo else hashlib.sha256(cfg.sps_username.encode()).hexdigest()[:16]
+    passwords = CourierPasswords(Path(cfg.data_dir) / f"couriers-{account}.json")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -89,7 +100,11 @@ def create_app(settings=None, sps=None, static_dir=None):
 
     @app.exception_handler(SPSError)
     async def sps_error(request, exc):
-        return JSONResponse({"detail": str(exc)}, status_code=502)
+        return JSONResponse({"detail": str(exc), "needs_credentials": isinstance(exc, CourierCredentialsError)}, status_code=502)
+
+    @app.exception_handler(OSError)
+    async def storage_error(request, exc):
+        return JSONResponse({"detail": "Heslo sa nepodarilo uložiť. Skontrolujte dátový volume aplikácie."}, status_code=500)
 
     @app.get("/healthz")
     async def health():
@@ -145,10 +160,29 @@ def create_app(settings=None, sps=None, static_dir=None):
             raise HTTPException(409, "Niektorý balík nie je v načítanom zozname SPS. Obnovte zoznam.")
         choices = await client.couriers([known[n]["trackNumber"] for n in numbers])
         session["allowed_numbers"] = set(numbers)
-        session["couriers"] = {str(c["id"]): c["id"] for c in choices}
-        hints = {str(known[n].get("tourCourier")) for n in numbers}
-        suggested = next((c["id"] for c in choices if len(hints) == 1 and str(c["id"]) in hints), None)
-        return {"couriers": choices, "suggested": suggested}
+        session["couriers"] = {str(c["id"]): c for c in choices}
+        # SPS orders the courier who scanned the delivery first. Preserve that order.
+        return {"couriers": [{**c, "has_password": passwords.password(c["id"]) is not None} for c in choices],
+                "suggested": choices[0]["id"] if choices else None}
+
+    @app.get("/api/courier-passwords")
+    async def saved_couriers():
+        return {"couriers": passwords.couriers()}
+
+    @app.post("/api/courier-passwords/save")
+    async def save_courier(request: Request, body: CourierPasswordBody):
+        choices = {str(c["id"]): c for c in passwords.couriers()}
+        choices.update(session_for(request)["couriers"])
+        courier = choices.get(str(body.courier_id))
+        if not courier:
+            raise HTTPException(422, "Vyberte kuriéra zo zoznamu SPS.")
+        passwords.save(courier, body.password.get_secret_value())
+        return {"ok": True}
+
+    @app.post("/api/courier-passwords/remove")
+    async def remove_courier(body: CourierBody):
+        passwords.remove(body.courier_id)
+        return {"ok": True}
 
     @app.post("/api/accept")
     async def accept(request: Request, body: AcceptBody):
@@ -159,8 +193,19 @@ def create_app(settings=None, sps=None, static_dir=None):
         if str(body.courier_id) not in session["couriers"]:
             raise HTTPException(422, "Vyberte kuriéra zo zoznamu SPS.")
         number = session["shipments"][code]["trackNumber"]
-        await client.accept(number, session["couriers"][str(body.courier_id)], body.password.get_secret_value())
-        return {"number": number, "accepted": True}
+        courier = session["couriers"][str(body.courier_id)]
+        password = body.password.get_secret_value() if body.password is not None else passwords.password(courier["id"])
+        if password is None:
+            raise CourierCredentialsError("Pre tohto kuriéra ešte nie je uložené heslo. Zadajte ho.")
+        await client.accept(number, courier["id"], password)
+        password_saved = True
+        if body.password is not None:
+            try:
+                passwords.save(courier, password)
+            except OSError:
+                # The parcel is already accepted; do not report it as failed.
+                password_saved = False
+        return {"number": number, "accepted": True, "password_saved": password_saved}
 
     web = Path(static_dir) if static_dir else Path(__file__).parent.parent / "web" / "dist"
     if (web / "assets").exists():

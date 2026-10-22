@@ -1,12 +1,13 @@
-import { BrowserMultiFormatReader } from '@zxing/browser';
 import { BarcodeFormat, DecodeHintType } from '@zxing/library';
+import { PreviewBarcodeReader } from './camera.js';
+import { playScanSound } from './scan-feedback.js';
 import { classifyScan, normalizeCode, remainingItems, parcelCount } from './domain.js';
 import './style.css';
 
 const $ = id => document.getElementById(id);
-const state = { csrf: '', demo: false, shipments: new Map(), selected: new Map(), loading: false, receiving: false, finished: false };
+const state = { csrf: '', demo: false, shipments: new Map(), selected: new Map(), couriers: [], loading: false, preparing: false, receiving: false, finished: false };
 let scanner = null, cameraStarting = false, cameraGeneration = 0, torchOn = false, audio = null;
-let lastSeen = { code: '', time: 0 };
+let managedCouriers = [];
 
 function text(tag, value, className = '') {
   const node = document.createElement(tag);
@@ -24,7 +25,9 @@ async function api(path, data) {
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && path !== 'login') showLogin();
-    throw new Error(typeof result.detail === 'string' ? result.detail : 'Požiadavka zlyhala. Skús to znova.');
+    const error = new Error(typeof result.detail === 'string' ? result.detail : 'Požiadavka zlyhala. Skús to znova.');
+    error.status = response.status;
+    throw error;
   }
   return result;
 }
@@ -41,34 +44,29 @@ function initAudio() {
   } catch { /* Sound is optional. */ }
 }
 
-function beep() {
+function beep(kind) {
+  void playScanSound(audio, kind);
   try {
-    if (audio?.state === 'running') {
-      const oscillator = audio.createOscillator(), gain = audio.createGain();
-      oscillator.connect(gain); gain.connect(audio.destination);
-      oscillator.frequency.value = 920; gain.gain.value = 0.09;
-      oscillator.start(); oscillator.stop(audio.currentTime + 0.09);
-    }
-    navigator.vibrate?.(65);
+    navigator.vibrate?.(kind === 'match' ? 80 : kind === 'duplicate' ? [40, 50, 40] : [150, 70, 150]);
   } catch { /* Camera and manual input continue without sound. */ }
 }
 
-function scanCode(value, fromCamera = false) {
-  if (state.loading || state.receiving || state.finished) return;
+function scanCode(value) {
+  if (state.loading || state.preparing || state.receiving || state.finished) return;
   const code = normalizeCode(value);
-  if (fromCamera && lastSeen.code === code && Date.now() - lastSeen.time < 2000) return;
-  lastSeen = { code, time: Date.now() };
   const result = classifyScan(code, state.shipments, state.selected);
   if (result.kind === 'empty') return;
+  beep(result.kind);
   if (result.kind === 'duplicate') return feedback(`${code} už je v tejto dávke.`, 'warning');
   if (result.kind === 'unknown') return feedback(`${code}: nie je v zozname SPS. Skús iný kód na štítku alebo obnov zoznam.`, 'error');
   if (result.kind === 'full') return feedback('V jednej dávke môže byť najviac 200 balíkov.', 'warning');
   state.selected.set(result.code, { ...result.shipment, state: 'pending', message: '' });
   feedback(`✓ ${result.shipment.trackNumber} · pridané do dávky`, 'success');
-  beep(); render();
+  render();
 }
 
 function render() {
+  const busy = state.loading || state.preparing || state.receiving;
   const n = state.selected.size, remaining = remainingItems(state.selected).length;
   const accepted = [...state.selected.values()].filter(x => x.state === 'accepted').length;
   $('selected-count').textContent = n;
@@ -77,15 +75,16 @@ function render() {
   $('bottom-count').textContent = state.receiving ? `${accepted} / ${n} prijatých` : parcelCount(n);
   $('bottom-help').textContent = state.receiving ? 'Odosielam do SPS…' : state.finished ? 'Príjem dokončený' : 'Naskenované, ešte nepotvrdené';
   $('prepare').textContent = accepted ? `Prijať zvyšných ${remaining}` : `Prijať ${n || ''} ${n === 1 ? 'balík' : n >= 2 && n <= 4 ? 'balíky' : 'balíkov'}`;
-  $('prepare').disabled = !remaining || state.loading || state.receiving;
+  $('prepare').disabled = !remaining || busy;
   $('prepare').hidden = state.finished;
   $('new-receipt').hidden = !state.finished;
-  $('refresh').disabled = state.loading || state.receiving;
-  $('scan').disabled = state.loading || state.receiving || state.finished || cameraStarting;
-  $('manual-add').disabled = state.loading || state.receiving || state.finished;
-  $('manual-code').disabled = state.receiving || state.finished;
-  $('logout').disabled = state.receiving;
-  $('demo-add').disabled = state.loading || state.receiving || state.finished;
+  $('refresh').disabled = busy;
+  $('manage-couriers').disabled = busy;
+  $('scan').disabled = busy || state.finished || cameraStarting;
+  $('manual-add').disabled = busy || state.finished;
+  $('manual-code').disabled = busy || state.finished;
+  $('logout').disabled = state.preparing || state.receiving;
+  $('demo-add').disabled = busy || state.finished;
   $('empty-selection').hidden = n > 0;
   const list = $('selected-list'); list.replaceChildren();
   for (const [code, item] of [...state.selected].reverse()) {
@@ -95,7 +94,7 @@ function render() {
     info.append(text('strong', item.trackNumber), text('span', item.senderName || 'Zásielka SPS', 'muted'));
     if (item.message) info.append(text('small', item.message, item.state === 'failed' ? 'error-text' : 'muted'));
     li.append(badge, info);
-    if (item.state !== 'accepted' && !state.receiving) {
+    if (item.state !== 'accepted' && !state.receiving && !state.preparing) {
       const remove = text('button', '×', 'remove');
       remove.type = 'button'; remove.setAttribute('aria-label', `Odstrániť ${item.trackNumber}`);
       remove.addEventListener('click', () => {
@@ -108,9 +107,6 @@ function render() {
     list.append(li);
   }
   renderCatalog();
-  $('step-scan').className = !state.receiving && !state.finished ? 'active' : '';
-  $('step-confirm').className = state.receiving ? 'active' : '';
-  $('step-done').className = state.finished ? 'active' : '';
 }
 
 function renderCatalog() {
@@ -122,9 +118,9 @@ function renderCatalog() {
     info.append(text('strong', shipment.trackNumber), text('span', shipment.senderName || 'Zásielka SPS', 'muted'));
     const selected = state.selected.has(normalizeCode(shipment.trackNumber));
     const add = text('button', selected ? '✓' : '+', 'catalog-add');
-    add.type = 'button'; add.disabled = selected || state.receiving || state.finished || state.loading;
+    add.type = 'button'; add.disabled = selected || state.receiving || state.preparing || state.finished || state.loading;
     add.setAttribute('aria-label', `Pridať ${shipment.trackNumber}`);
-    add.addEventListener('click', () => scanCode(shipment.trackNumber));
+    add.addEventListener('click', () => { initAudio(); scanCode(shipment.trackNumber); });
     li.append(info, add); list.append(li);
   }
   if (matches.length > 100) list.append(text('li', 'Zobrazených prvých 100. Použi vyhľadávanie.', 'footnote'));
@@ -163,10 +159,10 @@ async function startCamera() {
   initAudio(); cameraStarting = true; render();
   const generation = ++cameraGeneration;
   const hints = new Map([[DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.CODE_128, BarcodeFormat.CODE_39, BarcodeFormat.CODE_93, BarcodeFormat.ITF, BarcodeFormat.DATA_MATRIX, BarcodeFormat.QR_CODE, BarcodeFormat.PDF_417, BarcodeFormat.EAN_13]]]);
-  const reader = new BrowserMultiFormatReader(hints, { delayBetweenScanAttempts: 100, delayBetweenScanSuccess: 350 });
+  const reader = new PreviewBarcodeReader($('video'), hints, { delayBetweenScanAttempts: 100, delayBetweenScanSuccess: 900 });
   try {
     const controls = await reader.decodeFromConstraints({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } }, $('video'), result => {
-      if (result && generation === cameraGeneration) scanCode(result.getText(), true);
+      if (result && generation === cameraGeneration) scanCode(result.getText());
     });
     if (generation !== cameraGeneration) { controls.stop(); return; }
     scanner = controls;
@@ -179,39 +175,68 @@ async function startCamera() {
   } finally { cameraStarting = false; render(); }
 }
 
+function courierChanged(forcePassword = false) {
+  const courier = state.couriers.find(c => String(c.id) === $('courier').value);
+  const saved = courier?.has_password && !forcePassword;
+  $('courier-password').value = '';
+  $('courier-password').required = !saved;
+  $('courier-password').placeholder = saved ? 'Uložené heslo sa použije automaticky' : 'Zadaj heslo kuriéra';
+  $('courier-hint').textContent = saved ? 'Môžeš použiť uložené heslo alebo zadať nové.' : 'Po úspešnom prijatí si heslo zapamätáme.';
+}
+
+function showCourierDialog(courierId, error = '', forcePassword = false) {
+  $('confirm-title').textContent = `Prijať ${parcelCount(remainingItems(state.selected).length)}`;
+  $('courier').replaceChildren(...state.couriers.map(c => new Option(`${c.code} · ${c.name}${c.has_password ? ' · uložené heslo' : ''}`, String(c.id))));
+  if (courierId !== undefined) $('courier').value = String(courierId);
+  courierChanged(forcePassword);
+  $('confirm-error').textContent = error;
+  $('confirm-submit').disabled = !state.couriers.length;
+  if (!$('confirm-dialog').open) $('confirm-dialog').showModal();
+  if ($('courier-password').required) $('courier-password').focus();
+}
+
 async function prepareReceipt() {
-  stopCamera(); $('confirm-error').textContent = ''; $('courier-password').value = '';
-  $('courier').replaceChildren(new Option('Načítavam kuriérov…', ''));
-  $('confirm-submit').disabled = true;
-  const remaining = remainingItems(state.selected);
-  $('confirm-title').textContent = `Prijať ${parcelCount(remaining.length)}`;
-  $('confirm-dialog').showModal();
+  if (state.preparing || state.receiving) return;
+  state.preparing = true; stopCamera();
+  feedback('Načítavam kuriérov zo SPS…');
   try {
-    const result = await api('couriers', { numbers: remaining.map(x => x.trackNumber) });
-    $('courier').replaceChildren(new Option('Vyber kuriéra', ''), ...result.couriers.map(c => new Option(`${c.code} · ${c.name}`, String(c.id))));
-    if (result.suggested !== null) $('courier').value = String(result.suggested);
-    $('confirm-submit').disabled = !result.couriers.length;
-    if (result.suggested !== null) $('courier-password').focus();
-  } catch (error) { $('confirm-error').textContent = error.message; }
+    const result = await api('couriers', { numbers: remainingItems(state.selected).map(x => x.trackNumber) });
+    state.couriers = result.couriers;
+    const first = result.couriers[0];
+    if (!first) throw new Error('SPS nevrátilo žiadneho kuriéra. Obnov zoznam zásielok.');
+    if (first.has_password) {
+      feedback(`Používam uložené heslo: ${first.code} · ${first.name}.`);
+      await receiveBatch(String(first.id));
+    } else showCourierDialog(first.id);
+  } catch (error) { feedback(error.message, 'error'); }
+  finally { state.preparing = false; render(); }
 }
 
 async function receive(event) {
   event.preventDefault();
   if (state.receiving) return;
-  let password = $('courier-password').value;
-  const courierId = $('courier').value;
-  if (!password || !courierId) return;
+  const password = $('courier-password').value;
+  if (!$('courier').value || (!password && $('courier-password').required)) return;
+  await receiveBatch($('courier').value, password || undefined);
+}
+
+async function receiveBatch(courierId, password) {
   $('courier-password').value = ''; $('confirm-dialog').close();
   state.receiving = true; $('result').hidden = true; render();
-  let errorMessage = '';
+  let failed = null, saved = true;
   try {
     for (const item of remainingItems(state.selected)) {
       item.state = 'sending'; item.message = ''; render();
       try {
-        await api('accept', { number: item.trackNumber, courier_id: courierId, password });
+        const result = await api('accept', { number: item.trackNumber, courier_id: courierId, ...(password === undefined ? {} : { password }) });
+        saved = saved && result.password_saved !== false;
         item.state = 'accepted'; item.message = state.demo ? 'Prijaté v demo režime' : 'Prijaté do SPS';
+        if (result.password_saved !== false) {
+          const courier = state.couriers.find(c => String(c.id) === courierId);
+          if (courier) courier.has_password = true;
+        }
       } catch (error) {
-        item.state = 'failed'; item.message = error.message; errorMessage = error.message; break;
+        item.state = 'failed'; item.message = error.message; failed = error; break;
       }
       render();
     }
@@ -222,19 +247,81 @@ async function receive(event) {
     $('result').hidden = false;
     $('result').classList.toggle('result-error', !state.finished);
     $('result-title').textContent = `${accepted} z ${state.selected.size} balíkov prijatých${state.demo ? ' v deme' : ' do SPS'}`;
-    $('result-text').textContent = state.finished ? 'Hotovo. Môžeš začať nový príjem.' : `${errorMessage} Po oprave môžeš potvrdiť zostávajúce balíky znova.`;
-    feedback(state.finished ? '✓ Príjem bol dokončený.' : 'Príjem sa zastavil. Pozri výsledok nižšie.', state.finished ? 'success' : 'error');
-    render(); $('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $('result-text').textContent = state.finished ? 'Hotovo. Môžeš začať nový príjem.' : `${failed?.message || ''} Potvrď zostávajúce balíky znova.`;
+    if (!saved) $('result-text').textContent += ' Heslo sa nepodarilo uložiť; pri ďalšom príjme ho bude treba zadať znova.';
+    feedback(state.finished ? '✓ Príjem bol dokončený.' : 'Príjem sa zastavil. Skontroluj kuriéra a heslo.', state.finished ? 'success' : 'error');
+    render();
+    if (failed && state.csrf && failed.status !== 401) showCourierDialog(courierId, failed.message, true);
+    else if (state.csrf) $('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 }
 
+function managerSelection() {
+  const courier = managedCouriers.find(c => String(c.id) === $('managed-courier').value);
+  $('managed-password').value = '';
+  $('save-courier').disabled = !courier;
+  $('forget-courier').disabled = !courier?.has_password;
+  $('manager-hint').textContent = courier?.has_password ? 'Heslo je uložené. Môžeš ho nahradiť alebo odstrániť.' : 'Vyber kuriéra a zadaj známe heslo.';
+}
+
+async function loadManagedCouriers() {
+  $('save-courier').disabled = true; $('forget-courier').disabled = true;
+  $('managed-courier').replaceChildren(new Option('Načítavam…', ''));
+  const saved = await api('courier-passwords');
+  let choices = [];
+  const numbers = [...state.shipments.values()].slice(0, 200).map(s => s.trackNumber);
+  if (numbers.length) {
+    try { choices = (await api('couriers', { numbers })).couriers; }
+    catch (error) { $('manager-message').textContent = error.message; }
+  }
+  managedCouriers = [...choices, ...saved.couriers.filter(c => !choices.some(x => String(x.id) === String(c.id))).map(c => ({ ...c, has_password: true }))];
+  $('managed-courier').replaceChildren(...managedCouriers.map(c => new Option(`${c.code} · ${c.name}${c.has_password ? ' · uložené heslo' : ''}`, String(c.id))));
+  managerSelection();
+  if (!managedCouriers.length) $('manager-hint').textContent = 'Zoznam kuriérov sa načíta, keď budú v SPS zásielky na príjem.';
+}
+
+async function openCourierManager() {
+  stopCamera(); $('manager-message').textContent = '';
+  $('passwords-dialog').showModal();
+  try { await loadManagedCouriers(); }
+  catch (error) { $('manager-message').textContent = error.message; }
+}
+
+$('passwords-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const courierId = $('managed-courier').value, password = $('managed-password').value;
+  if (!courierId || !password) return;
+  $('save-courier').disabled = true; $('forget-courier').disabled = true;
+  try {
+    await api('courier-passwords/save', { courier_id: courierId, password });
+    $('managed-password').value = '';
+    await loadManagedCouriers();
+    $('managed-courier').value = courierId; managerSelection();
+    $('manager-message').textContent = 'Heslo je uložené.';
+  } catch (error) { $('manager-message').textContent = error.message; $('save-courier').disabled = false; }
+});
+$('forget-courier').addEventListener('click', async () => {
+  const courierId = $('managed-courier').value;
+  if (!courierId) return;
+  $('save-courier').disabled = true; $('forget-courier').disabled = true;
+  try {
+    await api('courier-passwords/remove', { courier_id: courierId });
+    await loadManagedCouriers();
+    if (managedCouriers.some(c => String(c.id) === courierId)) $('managed-courier').value = courierId;
+    managerSelection(); $('manager-message').textContent = 'Uložené heslo bolo odstránené.';
+  } catch (error) { $('manager-message').textContent = error.message; managerSelection(); }
+});
+
 function showLogin() {
   stopCamera(); $('confirm-dialog').close(); $('courier-password').value = '';
+  $('passwords-dialog').close(); $('managed-password').value = ''; state.couriers = []; managedCouriers = [];
+  $('manage-couriers').hidden = true;
   state.csrf = ''; $('login-view').hidden = false; $('work-view').hidden = true; $('logout').hidden = true;
 }
 
 async function showWork(session) {
   state.csrf = session.csrf; state.demo = session.demo;
+  $('manage-couriers').hidden = false;
   $('login-view').hidden = true; $('work-view').hidden = false; $('logout').hidden = false;
   $('demo-banner').hidden = !session.demo; $('demo-add').hidden = !session.demo; $('demo-password').hidden = !session.demo;
   await loadShipments();
@@ -259,8 +346,14 @@ $('prepare').addEventListener('click', prepareReceipt);
 $('cancel-confirm').addEventListener('click', () => { $('courier-password').value = ''; $('confirm-dialog').close(); });
 $('confirm-dialog').addEventListener('cancel', () => { $('courier-password').value = ''; });
 $('confirm-form').addEventListener('submit', receive);
+$('courier').addEventListener('change', () => courierChanged());
+$('confirm-dialog').addEventListener('close', () => { $('courier-password').value = ''; });
+$('manage-couriers').addEventListener('click', openCourierManager);
+$('managed-courier').addEventListener('change', managerSelection);
+$('close-passwords').addEventListener('click', () => $('passwords-dialog').close());
+$('passwords-dialog').addEventListener('close', () => { $('managed-password').value = ''; });
 $('new-receipt').addEventListener('click', async () => { state.selected.clear(); state.finished = false; $('result').hidden = true; await loadShipments(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
-$('demo-add').addEventListener('click', () => { const next = [...state.shipments.values()].find(s => !state.selected.has(normalizeCode(s.trackNumber))); if (next) scanCode(next.trackNumber); else feedback('Všetky skúšobné balíky sú už pridané.'); });
+$('demo-add').addEventListener('click', () => { initAudio(); const next = [...state.shipments.values()].find(s => !state.selected.has(normalizeCode(s.trackNumber))); if (next) scanCode(next.trackNumber); else feedback('Všetky skúšobné balíky sú už pridané.'); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
 
 api('session').then(showWork).catch(() => showLogin());

@@ -12,6 +12,7 @@ class Settings:
     sps_password: str = ""
     demo: bool = True
     session_hours: int = 12
+    data_dir: str = "data"
 
     def __post_init__(self):
         parsed = urlsplit(self.public_url)
@@ -53,4 +54,5 @@ class Settings:
             sps_password=os.getenv("SPS_PASSWORD", ""),
             demo=os.getenv("SPS_DEMO", "true").lower() == "true",
             session_hours=int(os.getenv("SESSION_HOURS", "12")),
+            data_dir=os.getenv("DATA_DIR", "data"),
         )
