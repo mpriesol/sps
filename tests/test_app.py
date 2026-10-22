@@ -119,6 +119,7 @@ def test_prefix_static_assets_health_and_cookie(setup):
     cookie = response.headers['set-cookie']
     assert 'HttpOnly' in cookie and 'Secure' in cookie and 'SameSite=strict' in cookie and 'Path=/sps/' in cookie
     assert response.headers['cache-control'] == 'no-store'
+    assert 'microphone=(self)' in response.headers['permissions-policy']
 
 
 def test_demo_mode_does_not_need_sps_credentials(tmp_path):

@@ -1,6 +1,7 @@
 import { BarcodeFormat, DecodeHintType } from '@zxing/library';
 import { PreviewBarcodeReader } from './camera.js';
 import { playScanSound } from './scan-feedback.js';
+import { matchSpokenSuffix, VoiceInput } from './voice.js';
 import { classifyScan, normalizeCode, remainingItems, parcelCount } from './domain.js';
 import './style.css';
 
@@ -8,6 +9,9 @@ const $ = id => document.getElementById(id);
 const state = { csrf: '', demo: false, shipments: new Map(), selected: new Map(), couriers: [], loading: false, preparing: false, receiving: false, finished: false };
 let scanner = null, cameraStarting = false, cameraGeneration = 0, torchOn = false, audio = null;
 let managedCouriers = [];
+let spokenPrompt = null, promptTimer = null, wakeLock = null, wakeGeneration = 0;
+const voice = new VoiceInput({ onTranscript: scanSpeech, onState: renderVoice,
+  onError: message => feedback(message, 'error') });
 
 function text(tag, value, className = '') {
   const node = document.createElement(tag);
@@ -65,6 +69,90 @@ function scanCode(value) {
   render();
 }
 
+function renderVoice(active) {
+  $('voice').textContent = active ? 'Stop hlas' : 'Hlasom';
+  $('voice').setAttribute('aria-pressed', String(active));
+  $('voice-placeholder').hidden = !active;
+  if (!active) cancelVoicePrompt();
+  void keepScreenOn(active);
+}
+
+async function keepScreenOn(active) {
+  const generation = ++wakeGeneration, previous = wakeLock;
+  wakeLock = null;
+  try {
+    await previous?.release();
+    if (!active || !navigator.wakeLock) return;
+    const lock = await navigator.wakeLock.request('screen');
+    if (generation === wakeGeneration && voice.active) wakeLock = lock;
+    else await lock.release();
+  } catch { /* Some devices decline wake locks, for example in power-saving mode. */ }
+}
+
+function cancelVoicePrompt() {
+  clearTimeout(promptTimer);
+  if (spokenPrompt) {
+    spokenPrompt.onend = null; spokenPrompt.onerror = null;
+    spokenPrompt = null; window.speechSynthesis?.cancel();
+  }
+}
+
+function sayVoicePrompt(message) {
+  if (!voice.active || !window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
+  cancelVoicePrompt();
+  // Do not mistake the app's own spoken instructions for a parcel code.
+  voice.pause();
+  try {
+    const prompt = new SpeechSynthesisUtterance(message);
+    spokenPrompt = prompt;
+    prompt.lang = 'sk-SK'; prompt.rate = 1; prompt.volume = 1;
+    const slovak = speechSynthesis.getVoices().find(v => v.lang.toLowerCase().startsWith('sk'));
+    if (slovak) prompt.voice = slovak;
+    prompt.onend = prompt.onerror = () => {
+      if (spokenPrompt !== prompt) return;
+      spokenPrompt = null; voice.resume();
+    };
+    // Let the three error beeps finish before speaking.
+    promptTimer = setTimeout(() => {
+      if (voice.active && spokenPrompt === prompt) {
+        try { speechSynthesis.speak(prompt); }
+        catch { spokenPrompt = null; voice.resume(); }
+      }
+    }, 600);
+  } catch { spokenPrompt = null; voice.resume(); }
+}
+
+function scanSpeech(transcript) {
+  if (!voice.active || state.loading || state.preparing || state.receiving || state.finished) return;
+  const result = matchSpokenSuffix(transcript, state.shipments, state.selected);
+  $('voice-transcript').textContent = `Počul som: „${transcript.slice(0, 100)}“${result.suffix ? ` → ${result.suffix}` : ''}`;
+  if (result.kind === 'match') { $('voice-prompt').textContent = 'Povedz posledné 2 znaky'; scanCode(result.code); return; }
+  beep('unknown');
+  if (result.kind === 'ambiguous') {
+    const length = result.suffix.length + 1;
+    $('voice-prompt').textContent = `Povedz posledné ${length} ${length <= 4 ? 'znaky' : 'znakov'}`;
+    feedback(`Koncovka ${result.suffix}: ${parcelCount(result.count)}. ${$('voice-prompt').textContent} znova.`, 'warning');
+    sayVoicePrompt(`Viac zhôd. ${$('voice-prompt').textContent}.`);
+  } else if (result.kind === 'unknown') {
+    feedback(`${result.suffix}: žiadny kód v zozname SPS takto nekončí. Skús to znova.`, 'error');
+    sayVoicePrompt('Balík sa nenašiel. Zopakuj koniec kódu.');
+  } else {
+    feedback('Povedz posledné dva znaky, každý zvlášť. Napríklad „pé tri“ alebo „nula sedem“.', 'warning');
+    sayVoicePrompt('Nerozumiem. Povedz posledné dva znaky, každý zvlášť.');
+  }
+}
+
+function toggleVoice() {
+  if (voice.active) { voice.stop(); feedback('Hlasové zadávanie je vypnuté.'); return; }
+  if (state.loading || state.preparing || state.receiving || state.finished) return;
+  if (!window.isSecureContext) { feedback('Mikrofón potrebuje HTTPS.', 'error'); return; }
+  initAudio(); stopCamera();
+  $('voice-transcript').textContent = '';
+  $('voice-prompt').textContent = 'Povedz posledné 2 znaky';
+  feedback('Povoľ mikrofón a povedz posledné dva znaky kódu.');
+  voice.start();
+}
+
 function render() {
   const busy = state.loading || state.preparing || state.receiving;
   const n = state.selected.size, remaining = remainingItems(state.selected).length;
@@ -81,6 +169,7 @@ function render() {
   $('refresh').disabled = busy;
   $('manage-couriers').disabled = busy;
   $('scan').disabled = busy || state.finished || cameraStarting;
+  $('voice').disabled = busy || state.finished || cameraStarting;
   $('manual-add').disabled = busy || state.finished;
   $('manual-code').disabled = busy || state.finished;
   $('logout').disabled = state.preparing || state.receiving;
@@ -128,6 +217,7 @@ function renderCatalog() {
 }
 
 async function loadShipments() {
+  voice.stop();
   state.loading = true; $('load-error').hidden = true; render();
   try {
     const result = await api('shipments');
@@ -152,6 +242,7 @@ function stopCamera() {
 }
 
 async function startCamera() {
+  voice.stop();
   if (scanner) { stopCamera(); return; }
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     feedback('Fotoaparát potrebuje HTTPS. Otvor aplikáciu cez jej zabezpečenú adresu.', 'error'); return;
@@ -197,6 +288,7 @@ function showCourierDialog(courierId, error = '', forcePassword = false) {
 
 async function prepareReceipt() {
   if (state.preparing || state.receiving) return;
+  voice.stop();
   state.preparing = true; stopCamera();
   feedback('Načítavam kuriérov zo SPS…');
   try {
@@ -281,6 +373,7 @@ async function loadManagedCouriers() {
 }
 
 async function openCourierManager() {
+  voice.stop();
   stopCamera(); $('manager-message').textContent = '';
   $('passwords-dialog').showModal();
   try { await loadManagedCouriers(); }
@@ -313,6 +406,7 @@ $('forget-courier').addEventListener('click', async () => {
 });
 
 function showLogin() {
+  voice.stop();
   stopCamera(); $('confirm-dialog').close(); $('courier-password').value = '';
   $('passwords-dialog').close(); $('managed-password').value = ''; state.couriers = []; managedCouriers = [];
   $('manage-couriers').hidden = true;
@@ -334,11 +428,13 @@ $('login-form').addEventListener('submit', async event => {
   finally { $('login-button').disabled = false; }
 });
 $('logout').addEventListener('click', async () => {
+  voice.stop();
   try { await api('logout', {}); state.selected.clear(); state.shipments.clear(); state.finished = false; showLogin(); }
   catch (error) { feedback(error.message, 'error'); }
 });
 $('manual-form').addEventListener('submit', event => { event.preventDefault(); initAudio(); scanCode($('manual-code').value); $('manual-code').value = ''; });
 $('scan').addEventListener('click', startCamera);
+$('voice').addEventListener('click', toggleVoice);
 $('torch').addEventListener('click', async () => { try { torchOn = !torchOn; await scanner?.switchTorch?.(torchOn); $('torch').textContent = torchOn ? 'Vypnúť svetlo' : 'Prisvietiť'; } catch { feedback('Tento fotoaparát nepodporuje prisvietenie.', 'warning'); } });
 $('refresh').addEventListener('click', loadShipments);
 $('search').addEventListener('input', renderCatalog);
@@ -354,6 +450,7 @@ $('close-passwords').addEventListener('click', () => $('passwords-dialog').close
 $('passwords-dialog').addEventListener('close', () => { $('managed-password').value = ''; });
 $('new-receipt').addEventListener('click', async () => { state.selected.clear(); state.finished = false; $('result').hidden = true; await loadShipments(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
 $('demo-add').addEventListener('click', () => { initAudio(); const next = [...state.shipments.values()].find(s => !state.selected.has(normalizeCode(s.trackNumber))); if (next) scanCode(next.trackNumber); else feedback('Všetky skúšobné balíky sú už pridané.'); });
-document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { stopCamera(); voice.stop(); } });
+window.addEventListener('pagehide', () => { stopCamera(); voice.stop(); });
 
 api('session').then(showWork).catch(() => showLogin());

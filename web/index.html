@@ -25,11 +25,12 @@
         <div id="camera-preview" class="camera-preview">
           <video id="video" muted playsinline></video>
           <div id="camera-placeholder" class="camera-placeholder"><div class="barcode-icon" aria-hidden="true">▌▏▎▌▏▌▎▏</div><strong>Namier na čiarový kód</strong><span>Fotoaparát zostane zapnutý<br>pre celú dávku balíkov.</span></div>
+          <div id="voice-placeholder" class="camera-placeholder voice-placeholder" hidden><span class="voice-indicator">● HLASOVÝ REŽIM</span><strong id="voice-prompt">Povedz posledné 2 znaky</strong><span>Každý znak zvlášť:<br>„pé tri“ alebo „osem sedem“.</span><p id="voice-transcript" aria-live="polite"></p></div>
           <div id="scan-frame" class="scan-frame" hidden><span></span></div>
           <span id="live-badge" class="live-badge" hidden>● KAMERA ZAPNUTÁ</span>
         </div>
         <p id="scan-feedback" class="feedback" role="status" aria-live="polite">Načítavam zoznam zo SPS…</p>
-        <div class="camera-controls"><button id="scan" class="primary">Zapnúť skenovanie</button><button id="torch" class="secondary" hidden>Prisvietiť</button></div>
+        <div class="camera-controls"><button id="scan" class="primary">Zapnúť skenovanie</button><button id="voice" class="secondary" aria-pressed="false" aria-label="Hlasové zadávanie konca kódu">Hlasom</button><button id="torch" class="secondary" hidden>Prisvietiť</button></div>
       </section>
       <form id="manual-form" class="manual-form"><label class="sr-only" for="manual-code">Číslo zásielky</label><input id="manual-code" placeholder="Alebo zadaj číslo zásielky" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="100"><button class="secondary" id="manual-add" aria-label="Pridať zásielku">Pridať</button></form>
       <button id="demo-add" class="demo-add" hidden>+ Pridať skúšobný balík</button>

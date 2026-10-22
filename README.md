@@ -13,6 +13,27 @@ Samostatná malá webová aplikácia pre príjem zásielok od kuriéra SPS. Otvo
 
 Kódy možno zadať aj ručne, načítať USB/Bluetooth čítačkou do vstupného poľa alebo vybrať zo zoznamu. Čísla s úvodnými nulami zostávajú nezmenené. Párovanie prechádza celý zoznam SPS, aj keď sa na obrazovke zobrazuje iba časť.
 
+## Hlasové zadávanie po slovensky
+
+Stlač **Hlasom**, povoľ mikrofón a povedz **posledné dva znaky kódu**, každý zvlášť. Mobil môže zostať položený na poličke: netreba držať tlačidlo ani po každom balíku klikať. Hlasový režim zostáva zapnutý pre ďalšie balíky; medzi kódmi urob krátku pauzu.
+
+| Povieš | Aplikácia hľadá koniec |
+| --- | --- |
+| „pé tri“ | `P3` |
+| „osem sedem“ | `87` |
+| „nula sedem“ | `07` |
+| „á bé“ | `AB` |
+
+Jediná zhoda pridá celý balík do dávky a pípne. Opakovanie rovnakého balíka dvojpípne. Neznámy alebo nerozpoznaný koniec dá tri nižšie pípnutia. Pri viacerých zhodách sa nič nepridá a aplikácia si vypýta posledné tri znaky. Povedz znovu **celý dlhší koniec**, napríklad „em pé tri“ pre `MP3`. Ak je aj ten nejednoznačný, vypýta si ďalší znak. Po úspechu znova stačia dva znaky. Do porovnania sa počítajú aj už naskenované balíky, aby sa pri nejednoznačnosti nevybral automaticky iný balík. Aplikácia porovnáva všetky vyslovené znaky; dlhší koniec nikdy neskráti na dva.
+
+Režim ukazuje počutý text aj jeho prevod na znaky. Hlasové rozpoznávanie nastavuje slovenčinu `sk-SK` cez `SpeechRecognition` / `webkitSpeechRecognition`. Vyžaduje podporovaný mobilný prehliadač, HTTPS a povolenie mikrofónu. Prepis môže využívať online službu poskytovateľa prehliadača; aplikácia nenahráva zvuk na svoj server ani nevyžaduje vlastný API kľúč. Ak rozpoznávanie nie je dostupné alebo prehliadač nepodporuje slovenčinu, zobrazí vysvetlenie a môžeš ďalej používať kameru či ručné zadanie.
+
+Pri viacerých zhodách zaznie aj hlasová požiadavka na dlhší koniec; pri nenájdenom balíku alebo nejasnom prepise zaznie krátke vysvetlenie. Počas vlastnej hlasovej výzvy aplikácia prestane počúvať, aby nezachytila svoj reproduktor, a potom počúvanie sama obnoví. Dostupnosť a výslovnosť hlasových výziev závisí od hlasov v telefóne. V podporovanom prehliadači sa počas hlasového režimu udržuje zapnutý displej. Ak telefón udržanie displeja odmietne, napríklad pri šetrení batérie, treba predĺžiť čas zhasnutia v nastavení telefónu. Dosah mikrofónu treba overiť podľa vzdialenosti a hluku v predajni; nie je potrebné držať telefón v ruke.
+
+Tlačidlo **Stop hlas** režim vypne. Vypne sa aj pri zapnutí kamery, obnovení zoznamu, otvorení kuriérov, potvrdení dávky, odhlásení alebo prepnutí aplikácie do pozadia. Hlas pridáva balíky iba do dávky; prijatie do SPS naďalej spúšťa tlačidlo **Prijať**.
+
+Prepis z reálneho mikrofónu treba vyskúšať na konkrétnom mobile. Jednotkové testy overujú prevod slovenských názvov, úvodné nuly, jednoznačnosť aj životný cyklus rozpoznávania; nenahrádzajú skúšku presnosti reči v predajni.
+
 ## Nasadenie
 
 **[Návod na server a adresu hub.biketrek.sk/sps →](docs/NASADENIE.md)**

@@ -152,6 +152,8 @@ docker compose -f compose.yaml -f compose.hub.yaml up -d --build
 
 Po aktualizácii obnov stránku na mobile a prihlás sa znova. V hornej lište otvor **Kuriéri** a môžeš dopredu uložiť známe heslá; prípadne sa zapamätajú pri prvom úspešnom príjme.
 
+Hlasové zadávanie zapneš tlačidlom **Hlasom** vedľa skenovania. Povoľ mikrofón a povedz dva posledné znaky, napríklad „nula sedem“ v deme. Pri viacerých zhodách si aplikácia vypýta posledné tri znaky. Nie je potrebná ďalšia konfigurácia ani API kľúč. Ak prehliadač rozpoznávanie nepodporuje, aplikácia to oznámi; kameru a ručné zadanie možno používať ďalej.
+
 Súbor `sps.env` zostáva na serveri. Heslá kuriérov zostávajú vo volume (zvyčajne `sps_courier_passwords`); pri aktualizácii nepoužívaj `down -v`, ktoré by tento volume vymazalo. Volume zahrň do serverovej zálohy ako citlivé údaje. Súbory sú prístupné iba používateľovi aplikácie a rootovi servera, nie sú šifrované. Zastavenie aplikácie: `docker compose -f compose.yaml -f compose.hub.yaml down`. Nevykonávaj aktualizáciu počas rozpracovaného príjmu, pretože dávka sa neukladá.
 
 ## Ak Caddy beží priamo na serveri

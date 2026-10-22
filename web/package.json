@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build --base=./",
-    "test": "node --test src/domain.test.js"
+    "test": "node --test src/*.test.js"
   },
   "dependencies": {
     "@zxing/browser": "0.1.5",

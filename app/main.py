@@ -88,7 +88,7 @@ def create_app(settings=None, sps=None, static_dir=None):
         response.headers.update({
             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-            "Permissions-Policy": "camera=(self), microphone=(), geolocation=()",
+            "Permissions-Policy": "camera=(self), microphone=(self), geolocation=()",
             "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
         })
         return response
