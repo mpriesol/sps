@@ -1,0 +1,15 @@
+# Put these directives INSIDE the existing hub.biketrek.sk site block.
+# Keep the existing Hub upstream in the fallback handle.
+redir /sps /sps/ 308
+handle /sps/* {
+    request_body {
+        max_size 64KB
+    }
+    reverse_proxy sps-receiver:8080
+}
+# Wrap the existing Hub routing in handle { ... } if not already wrapped:
+# handle {
+#     reverse_proxy api:8000
+# }
+# For a host-installed Caddy, replace sps-receiver:8080 with 127.0.0.1:8081.
+# Use handle, NOT handle_path. The application expects /sps to be preserved.

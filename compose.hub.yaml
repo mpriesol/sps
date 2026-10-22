@@ -1,0 +1,12 @@
+# Add this override when the existing Hub's Caddy runs in Docker.
+services:
+  sps:
+    networks:
+      default: {}
+      sps_proxy:
+        aliases:
+          - sps-receiver
+networks:
+  sps_proxy:
+    external: true
+    name: sps-proxy

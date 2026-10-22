@@ -1,0 +1,21 @@
+services:
+  sps:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: ./sps.env
+        format: raw
+    ports:
+      - "127.0.0.1:8081:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

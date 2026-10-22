@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="sk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#17252b">
+  <meta name="description" content="Mobilný príjem balíkov SPS pre výdajné miesto.">
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <title>Príjem balíkov · SPS</title>
+</head>
+<body>
+  <header class="topbar"><div class="brand"><span class="brand-icon" aria-hidden="true">▣</span><div><strong>Príjem balíkov</strong><span>SPS / výdajné miesto</span></div></div><button id="logout" class="text-button" hidden>Odhlásiť</button></header>
+  <main>
+    <section id="login-view" class="login-card card">
+      <span class="eyebrow">VÝDAJNÉ MIESTO</span><h1>Balíky prijaté.<br>Za pár skenov.</h1><p class="muted">Prihlás sa a načítaj zásielky fotoaparátom mobilu.</p>
+      <form id="login-form"><label for="app-password">Heslo aplikácie</label><input id="app-password" type="password" autocomplete="current-password" required maxlength="1024"><button class="primary full" id="login-button">Prihlásiť sa</button></form>
+      <p id="login-error" class="error-text" role="alert"></p>
+      <p class="footnote">Heslo nastavuje správca pri nasadení aplikácie.</p>
+    </section>
+
+    <section id="work-view" hidden>
+      <div id="demo-banner" class="demo-banner" hidden><strong>DEMO</strong> Skúšobné balíky. Nič sa neposiela do SPS.</div>
+      <div class="page-heading"><div><span class="eyebrow">PRÍJEM OD KURIÉRA</span><h1>Naskenuj. Potvrď. Hotovo.</h1></div><button id="refresh" class="secondary compact">Obnoviť</button></div>
+      <div class="steps" aria-label="Postup"><span id="step-scan" class="active">01 <b>Skenovanie</b></span><span id="step-confirm">02 <b>Potvrdenie</b></span><span id="step-done">03 <b>Hotovo</b></span></div>
+      <p id="load-error" class="error-box" role="alert" hidden></p>
+      <section class="camera-card" aria-label="Čítačka čiarových kódov">
+        <div id="camera-preview" class="camera-preview">
+          <video id="video" muted playsinline></video>
+          <div id="camera-placeholder" class="camera-placeholder"><div class="barcode-icon" aria-hidden="true">▌▏▎▌▏▌▎▏</div><strong>Namier na čiarový kód</strong><span>Fotoaparát zostane zapnutý<br>pre celú dávku balíkov.</span></div>
+          <div id="scan-frame" class="scan-frame" hidden><span></span></div>
+          <span id="live-badge" class="live-badge" hidden>● KAMERA ZAPNUTÁ</span>
+        </div>
+        <div class="camera-controls"><button id="scan" class="primary">Zapnúť skenovanie</button><button id="torch" class="secondary" hidden>Prisvietiť</button></div>
+      </section>
+      <p id="scan-feedback" class="feedback" role="status" aria-live="polite">Načítavam zoznam zo SPS…</p>
+      <form id="manual-form" class="manual-form"><label class="sr-only" for="manual-code">Číslo zásielky</label><input id="manual-code" placeholder="Alebo zadaj číslo zásielky" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="100"><button class="secondary" id="manual-add" aria-label="Pridať zásielku">Pridať</button></form>
+      <button id="demo-add" class="demo-add" hidden>+ Pridať skúšobný balík</button>
+      <section class="card selected-card"><div class="section-title"><h2>Táto dávka <span id="selected-count" class="count-badge">0</span></h2><span id="available-count" class="muted">— v SPS</span></div><div id="empty-selection" class="empty-selection"><span aria-hidden="true">↳</span> Naskenované balíky sa zobrazia tu.</div><ul id="selected-list" class="parcel-list"></ul></section>
+      <section id="result" class="result card" hidden aria-live="polite"><span class="eyebrow">VÝSLEDOK PRÍJMU</span><h2 id="result-title"></h2><p id="result-text"></p></section>
+      <details class="catalog card"><summary>Zoznam zásielok zo SPS <span id="catalog-count">0</span></summary><label class="sr-only" for="search">Hľadať zásielku</label><input id="search" placeholder="Hľadať číslo alebo odosielateľa" type="search"><ul id="catalog-list" class="parcel-list"></ul><p id="catalog-empty" class="muted" hidden>Nenašli sa žiadne zásielky.</p></details>
+      <p class="footnote">Naskenované balíky sa prijmú do SPS až po potvrdení kuriérom.</p>
+      <div class="bottom-bar"><div><strong id="bottom-count">0 balíkov</strong><span id="bottom-help">Pripravené na skenovanie</span></div><button id="prepare" class="primary" disabled>Prijať balíky</button><button id="new-receipt" class="primary" hidden>Nový príjem</button></div>
+    </section>
+  </main>
+
+  <dialog id="confirm-dialog"><form id="confirm-form"><div class="dialog-heading"><span class="eyebrow">POTVRDENIE KURIÉROM</span><h2 id="confirm-title">Prijať balíky</h2><p class="muted">Vyber kuriéra, ktorý zásielky odovzdáva.</p></div><label for="courier">Kuriér</label><select id="courier" required><option value="">Načítavam…</option></select><label for="courier-password">Heslo kuriéra</label><input id="courier-password" type="password" autocomplete="off" required maxlength="1024"><p id="demo-password" class="footnote" hidden>Demo heslo kuriéra: <strong>demo</strong></p><p id="confirm-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-confirm" class="secondary">Späť</button><button id="confirm-submit" class="primary" disabled>Potvrdiť príjem</button></div></form></dialog>
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>

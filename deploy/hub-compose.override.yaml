@@ -1,0 +1,11 @@
+# Merge into the Hub's existing compose.override.yaml; do not overwrite it.
+# Assumes the Hub reverse proxy service is named 'caddy'.
+services:
+  caddy:
+    networks:
+      default: {}
+      sps_proxy: {}
+networks:
+  sps_proxy:
+    external: true
+    name: sps-proxy
