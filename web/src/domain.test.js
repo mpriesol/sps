@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeCode, classifyScan, remainingItems, coverCrop } from './domain.js';
+import { normalizeCode, classifyScan, remainingItems, coverCrop, receiptComplete } from './domain.js';
 
 test('preserves leading zeros and accepts a scanner newline', () => {
   assert.equal(normalizeCode('  001234567890\r\n'), '001234567890');
@@ -16,8 +16,17 @@ test('unknown labels and repeated camera frames do not add another parcel', () =
   assert.equal(classifyScan('JJD00001', all, new Map([['JJD00001', {}]])).kind, 'duplicate');
 });
 test('retry includes failed and pending parcels, leaving confirmed ones complete', () => {
-  const selected = new Map([['a', { state: 'accepted' }], ['b', { state: 'failed' }], ['c', { state: 'pending' }]]);
+  const selected = new Map([['a', { state: 'accepted' }], ['b', { state: 'failed' }], ['c', { state: 'pending' }], ['d', { state: 'uncertain' }]]);
   assert.deepEqual(remainingItems(selected).map(x => x.state), ['failed', 'pending']);
+});
+test('removing the last pending parcel does not complete a batch with an unknown result', () => {
+  const selected = new Map([['accepted', { state: 'accepted' }], ['unknown', { state: 'uncertain' }], ['pending', { state: 'pending' }]]);
+  selected.delete('pending');
+  assert.equal(remainingItems(selected).length, 0);
+  assert.equal(receiptComplete(selected), false);
+  selected.set('unknown', { state: 'accepted' });
+  assert.equal(receiptComplete(selected), true);
+  assert.equal(receiptComplete(new Map()), false);
 });
 
 test('portrait camera fills a landscape preview by cropping top and bottom', () => {

@@ -3,7 +3,7 @@
 redir /sps /sps/ 308
 handle /sps/* {
     request_body {
-        max_size 64KB
+        max_size 3MB
     }
     reverse_proxy sps-receiver:8080
 }

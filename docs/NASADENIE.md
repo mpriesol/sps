@@ -1,6 +1,6 @@
 # Nasadenie na server
 
-Cieľová adresa: **https://hub.biketrek.sk/sps/**. Aplikácia beží samostatne, Hubu pribudne iba smerovanie `/sps`. Nemá databázu. Heslá kuriérov uchováva v trvalom Docker volume `courier_passwords`.
+Cieľová adresa: **https://hub.biketrek.sk/sps/**. Aplikácia beží samostatne, Hubu pribudne iba smerovanie `/sps`. SQLite databázu, heslá kuriérov, fotografie a načítané doklady uchováva v existujúcom trvalom Docker volume `courier_passwords`.
 
 ## 1. Stiahni aplikáciu
 
@@ -81,7 +81,7 @@ hub.biketrek.sk {
 
     handle /sps/* {
         request_body {
-            max_size 64KB
+            max_size 3MB
         }
         reverse_proxy sps-receiver:8080
     }
@@ -141,7 +141,7 @@ Obnov stránku a znovu sa prihlás. Demo označenie zmizne a aplikácia načíta
 
 ## Aktualizácia
 
-Pri prechode z prvej verzie stačí nasledujúci postup. Nový volume s heslami sa vytvorí automaticky; `sps.env` ani Caddyfile netreba meniť.
+Pred aktualizáciou zálohuj celý existujúci volume. Názov volume sa nemení, uložené heslá sa zachovajú a databáza sa vytvorí automaticky vedľa nich. `sps.env` netreba meniť. **Kvôli voliteľným fotografiám zvýš v existujúcom `handle /sps/*` limit Caddy z `64KB` na `3MB`**, over konfiguráciu a načítaj ju. Backend ďalej obmedzuje bežné požiadavky na 64 KB, hromadné operácie na 500 KB a fotografiu na 2,5 MB vrátane obalu.
 
 
 ```bash
@@ -154,7 +154,9 @@ Po aktualizácii obnov stránku na mobile a prihlás sa znova. V hornej lište o
 
 Hlasové zadávanie zapneš tlačidlom **Hlasom** vedľa skenovania. Povoľ mikrofón a povedz dva posledné znaky, napríklad „nula sedem“ v deme. Pri viacerých zhodách si aplikácia vypýta posledné tri znaky. Nie je potrebná ďalšia konfigurácia ani API kľúč. Ak prehliadač rozpoznávanie nepodporuje, aplikácia to oznámi; kameru a ručné zadanie možno používať ďalej.
 
-Súbor `sps.env` zostáva na serveri. Heslá kuriérov zostávajú vo volume (zvyčajne `sps_courier_passwords`); pri aktualizácii nepoužívaj `down -v`, ktoré by tento volume vymazalo. Volume zahrň do serverovej zálohy ako citlivé údaje. Súbory sú prístupné iba používateľovi aplikácie a rootovi servera, nie sú šifrované. Zastavenie aplikácie: `docker compose -f compose.yaml -f compose.hub.yaml down`. Nevykonávaj aktualizáciu počas rozpracovaného príjmu, pretože dávka sa neukladá.
+Súbor `sps.env` zostáva na serveri. Dáta zostávajú vo volume (zvyčajne `sps_courier_passwords`); pri aktualizácii nepoužívaj `down -v`, ktoré by vymazalo heslá, police aj históriu. Volume zahrň do serverovej zálohy ako citlivé údaje. Súbory nie sú šifrované. Pri jednoduchej súborovej zálohe zastav aplikáciu a skopíruj celý volume vrátane prípadných SQLite WAL súborov; alternatívou je SQLite backup API plus kópia fotografií a dokladov. Zastavenie aplikácie: `docker compose -f compose.yaml -f compose.hub.yaml down`. Neaktualizuj počas odosielania príjmu/výdaja do SPS. Rozpracovaný výber sa síce zálohuje v prehliadači, prerušená požiadavka na dopravcu však môže vyžadovať overenie výsledku.
+
+Pred používaním nových výdajov over v deme celý postup uvedený v [návode na police a výdaj](POLICE-A-VYDAJ.md). Po nasadení over na konkrétnom telefóne sken vytlačeného miesta a fotografiu. Prvý ostrý príjem, výdaj s dobierkou a dokladom aj vratku skontroluj v portáli SPS; vývojové testy používajú len demo a simulované odpovede. Verejný klient SPS môže svoje interné API zmeniť.
 
 ## Ak Caddy beží priamo na serveri
 

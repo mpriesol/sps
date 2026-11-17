@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.sps import CourierCredentialsError
+from app.sps import CourierCredentialsError, OperationUncertainError
 
 PASSWORD = "test-application-password-only"
 HEADERS = {"Origin": "https://testserver", "X-Requested-With": "sps-app"}
@@ -54,7 +54,7 @@ def prepare(client, headers):
     assert response.json()['suggested'] == 7
 
 
-def test_full_receiving_flow_and_explicit_repeat(setup):
+def test_full_receiving_flow_does_not_resend_confirmed_parcels(setup):
     client, fake = setup
     headers = login(client)
     prepare(client, headers)
@@ -62,7 +62,9 @@ def test_full_receiving_flow_and_explicit_repeat(setup):
         response = client.post('/sps/api/accept', json={"number": number, "courier_id": "7", "password": "courier-test"}, headers=headers)
         assert response.status_code == 200
         assert response.json()['accepted'] is True
-    assert fake.accepted == [('JJD00001', 7), ('SK0TEST2', 7), ('JJD00001', 7)]
+    assert fake.accepted == [('JJD00001', 7), ('SK0TEST2', 7)]
+    parcels = client.get('/sps/api/warehouse').json()['parcels']
+    assert {p['carrier_status'] for p in parcels} == {'accepted'}
 
 
 def test_authentication_csrf_and_logout(setup):
@@ -173,7 +175,7 @@ def test_password_management_missing_bad_corrected_and_removed(setup):
     headers = login(client)
     prepare(client, headers)
     body = {'number': 'JJD00001', 'courier_id': 7}
-    assert client.post('/sps/api/accept', json=body, headers=headers).json()['needs_credentials']
+    assert client.post('/sps/api/accept', json={**body, 'number': 'SK0TEST2'}, headers=headers).json()['needs_credentials']
     save = '/sps/api/courier-passwords/save'
     assert client.post(save, json={'courier_id': 7, 'password': 'bad'}, headers=HEADERS).status_code == 403
     assert client.post(save, json={'courier_id': 999, 'password': 'bad'}, headers=headers).status_code == 422
@@ -185,7 +187,7 @@ def test_password_management_missing_bad_corrected_and_removed(setup):
     assert client.post('/sps/api/accept', json=body, headers=headers).status_code == 200
     assert client.post('/sps/api/courier-passwords/remove', json={'courier_id': 7}, headers=headers).status_code == 200
     assert client.get('/sps/api/courier-passwords').json()['couriers'] == []
-    assert client.post('/sps/api/accept', json=body, headers=headers).json()['needs_credentials']
+    assert client.post('/sps/api/accept', json={**body, 'number': 'SK0TEST2'}, headers=headers).json()['needs_credentials']
 
 
 def test_failed_manual_password_is_not_remembered(setup):
@@ -202,3 +204,84 @@ def test_saving_password_does_not_accept_any_parcel(setup):
     prepare(client, headers)
     client.post('/sps/api/courier-passwords/save', json={'courier_id': 7, 'password': 'courier-test'}, headers=headers)
     assert fake.accepted == []
+
+
+def test_last_successful_courier_is_selected_across_logins_and_can_warn(setup):
+    client, fake = setup
+    async def ordered(numbers):
+        return [{'id': 8, 'code': 'TEST8', 'name': 'First'}, {'id': 7, 'code': 'TEST7', 'name': 'Second'}]
+    fake.couriers = ordered
+    headers = login(client)
+    client.get('/sps/api/shipments')
+    body = {'numbers': ['JJD00001', 'SK0TEST2']}
+    first = client.post('/sps/api/couriers', json=body, headers=headers).json()
+    assert first['suggested'] == 8 and first['warning_enabled'] is True
+    # Choosing or saving a password is not successful use.
+    client.post('/sps/api/courier-passwords/save', json={'courier_id': 7, 'password': 'courier-test'}, headers=headers)
+    assert client.post('/sps/api/couriers', json=body, headers=headers).json()['suggested'] == 8
+    client.post('/sps/api/accept', json={'number': 'JJD00001', 'courier_id': 7}, headers=headers)
+    headers = login(client)
+    client.get('/sps/api/shipments')
+    selected = client.post('/sps/api/couriers', json=body, headers=headers).json()
+    assert selected['suggested'] == 7 and selected['first_id'] == 8
+    assert selected['last_courier_id'] == '7' and selected['requires_selection'] is False
+    client.post('/sps/api/settings', json={'courier_warning': False}, headers=headers)
+    assert client.post('/sps/api/couriers', json=body, headers=headers).json()['warning_enabled'] is False
+
+
+def test_missing_last_courier_requires_manual_selection(setup):
+    client, fake = setup
+    headers = login(client)
+    prepare(client, headers)
+    client.post('/sps/api/accept', json={'number': 'JJD00001', 'courier_id': 7, 'password': 'courier-test'}, headers=headers)
+    async def replacement(numbers):
+        return [{'id': 9, 'code': 'TEST9', 'name': 'Replacement'}]
+    fake.couriers = replacement
+    response = client.post('/sps/api/couriers', json={'numbers': ['SK0TEST2']}, headers=headers).json()
+    assert response['suggested'] is None and response['requires_selection'] is True
+    assert response['first_id'] == 9 and response['last_courier_id'] == '7'
+
+
+def test_failed_receipt_does_not_replace_last_courier(setup):
+    client, fake = setup
+    async def ordered(numbers):
+        return [{'id': 8, 'code': 'TEST8', 'name': 'First'}, {'id': 7, 'code': 'TEST7', 'name': 'Second'}]
+    fake.couriers = ordered
+    headers = login(client)
+    client.get('/sps/api/shipments')
+    numbers = {'numbers': ['JJD00001', 'SK0TEST2']}
+    client.post('/sps/api/couriers', json=numbers, headers=headers)
+    assert client.post('/sps/api/accept', json={'number': 'JJD00001', 'courier_id': 7, 'password': 'wrong'}, headers=headers).status_code == 502
+    result = client.post('/sps/api/couriers', json=numbers, headers=headers).json()
+    assert result['suggested'] == 8 and result['last_courier_id'] is None
+
+
+def test_uncertain_receipt_keeps_location_and_blocks_blind_retry(setup):
+    client, fake = setup
+    headers = login(client)
+    prepare(client, headers)
+    location = client.post('/sps/api/locations/create', json={'rack_name': 'A', 'shelf_count': 1}, headers=headers).json()['locations'][0]
+    parcel = client.post('/sps/api/parcels/register', json={'number': 'JJD00001'}, headers=headers).json()['parcel']
+    client.post('/sps/api/parcels/move', json={'number': parcel['number'], 'location_id': location['id'],
+                'expected_version': parcel['version'], 'operation_id': 'move-0001'}, headers=headers)
+    async def uncertain(*args):
+        fake.accepted.append(args[:2])
+        raise OperationUncertainError('Výsledok nie je známy.')
+    fake.accept = uncertain
+    body = {'number': 'JJD00001', 'courier_id': 7, 'password': 'courier-test', 'operation_id': 'accept-0001'}
+    response = client.post('/sps/api/accept', json=body, headers=headers)
+    assert response.status_code == 502 and response.json()['outcome'] == 'uncertain'
+    again = client.post('/sps/api/accept', json={**body, 'operation_id': 'accept-0002'}, headers=headers)
+    assert again.status_code == 409 and len(fake.accepted) == 1
+    p = client.get('/sps/api/warehouse').json()['parcels'][0]
+    assert p['location_id'] == location['id'] and p['carrier_status'] == 'accept_uncertain'
+
+
+def test_app_password_and_csrf_protect_all_local_writes(setup):
+    client, _ = setup
+    assert client.get('/sps/api/warehouse').status_code == 401
+    headers = login(client)
+    assert client.post('/sps/api/locations/create', json={'rack_name': 'A'}, headers=HEADERS).status_code == 403
+    assert client.post('/sps/api/settings', json={'last_courier_id': '999'}, headers=headers).status_code == 422
+    session = client.get('/sps/api/session').json()
+    assert session['account'] == 'demo' and session['actor']

@@ -24,9 +24,43 @@ jobs:
       - run: npm test && npm run build
         working-directory: web
       - run: python -m pytest -q
+      - name: Install browser for demo workflow tests
+        run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Exercise parcel workflows in the browser (demo only)
+        env:
+          PUBLIC_URL: http://127.0.0.1:8765/sps
+          APP_PASSWORD: local-e2e-password-only
+          SPS_DEMO: 'true'
+          DATA_DIR: /tmp/sps-browser-test
+        run: |
+          python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8765 --no-access-log > /tmp/sps-browser-server.log 2>&1 &
+          sps_browser_pid=$!
+          trap 'kill "$sps_browser_pid" 2>/dev/null || true' EXIT
+          python - <<'PY'
+          import time, urllib.request
+          for attempt in range(40):
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:8765/sps/healthz', timeout=1)
+                  break
+              except OSError:
+                  time.sleep(0.25)
+          else:
+              raise SystemExit('Demo server did not start')
+          PY
+          npm --prefix web run test:browser
+      - name: Save browser validation screenshots and print sample
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parcel-browser-validation
+          path: test-results/browser/
+          if-no-files-found: ignore
       - run: docker build -t sps-receiver:test .
-      - name: Verify password volume with the non-root container user
+      - name: Verify persistent data with the non-root container user
         run: |
           docker run --rm --read-only --tmpfs /tmp -v sps-password-test:/app/data sps-receiver:test python -c "from app.courier_passwords import CourierPasswords; s = CourierPasswords('/app/data/test.json'); s.save({'id': 1, 'code': 'TEST', 'name': 'Test'}, 'test-only')"
           docker run --rm --read-only --tmpfs /tmp -v sps-password-test:/app/data sps-receiver:test python -c "from app.courier_passwords import CourierPasswords; s = CourierPasswords('/app/data/test.json'); assert s.password(1) == 'test-only'; assert s.path.stat().st_mode & 0o777 == 0o600"
+          docker run --rm --read-only --tmpfs /tmp -v sps-password-test:/app/data sps-receiver:test python -c "from app.warehouse import Warehouse; w = Warehouse('/app/data/test.sqlite3'); p = w.register_parcel('TEST001'); location = w.create_locations('A')[0]; w.move_parcel(p['number'], location['id'], p['version'], 'volume-test-001'); assert w.get_parcel('TEST001')['location_id'] == location['id']"
+          docker run --rm --read-only --tmpfs /tmp -v sps-password-test:/app/data sps-receiver:test python -c "from app.warehouse import Warehouse; w = Warehouse('/app/data/test.sqlite3'); assert w.get_parcel('TEST001')['location_id']; assert len(w.history('TEST001')) == 2; assert w.path.stat().st_mode & 0o777 == 0o600"
           docker volume rm sps-password-test

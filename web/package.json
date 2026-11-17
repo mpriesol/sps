@@ -5,13 +5,16 @@
   "type": "module",
   "scripts": {
     "build": "vite build --base=./",
-    "test": "node --test src/*.test.js"
+    "test": "node --test src/*.test.js",
+    "test:browser": "node scripts/browser-smoke.cjs"
   },
   "dependencies": {
     "@zxing/browser": "0.1.5",
-    "@zxing/library": "0.21.3"
+    "@zxing/library": "0.21.3",
+    "jsbarcode": "3.12.1"
   },
   "devDependencies": {
+    "playwright": "1.65.1",
     "vite": "^7.0.0"
   }
 }
