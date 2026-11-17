@@ -389,6 +389,13 @@ export class WarehouseWorkspace {
     for (const place of places) {
       const label = el('article', '', 'location-label'); label.append(el('strong', place.name, `print-location-name${place.name.length > 25 ? ' long-name' : place.name.length > 12 ? ' medium-name' : ''}`));
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); JsBarcode(svg, place.barcode, { format: 'CODE128', width: 2, height: 72, margin: 20, displayValue: false, background: '#ffffff', lineColor: '#000000' });
+      // JsBarcode emits inline CSS, which this app's CSP deliberately blocks.
+      // SVG presentation attributes preserve the white quiet zone and black bars.
+      svg.setAttribute('fill', '#000000');
+      svg.firstElementChild.setAttribute('fill', '#ffffff');
+      for (const group of svg.querySelectorAll('g')) group.setAttribute('fill', '#000000');
+      svg.removeAttribute('style');
+      for (const node of svg.querySelectorAll('[style]')) node.removeAttribute('style');
       label.append(svg, el('span', place.barcode, 'print-location-code')); print.append(label);
     }
     document.documentElement.classList.toggle('label-print-mode', $('label-format').value === 'label'); window.print();

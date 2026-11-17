@@ -25,7 +25,9 @@ jobs:
         working-directory: web
       - run: python -m pytest -q
       - name: Install browser for demo workflow tests
-        run: npx playwright install --with-deps chromium
+        run: |
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y poppler-utils
         working-directory: web
       - name: Exercise parcel workflows in the browser (demo only)
         env:
@@ -49,6 +51,8 @@ jobs:
               raise SystemExit('Demo server did not start')
           PY
           npm --prefix web run test:browser
+      - name: Decode barcodes from the actual A4 and thermal label PDFs
+        run: node web/scripts/check-label-pdfs.cjs
       - name: Save browser validation screenshots and print sample
         if: always()
         uses: actions/upload-artifact@v4

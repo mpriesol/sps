@@ -39,6 +39,20 @@ const output = path.resolve(__dirname, '../../test-results/browser');
     await page.locator('#manual-code').fill(code);
     await page.locator('#manual-add').click();
   };
+  const assertBarcodeColors = async media => {
+    const labels = await page.locator('#print-labels svg').evaluateAll(svgs => svgs.map(svg => ({
+      background: getComputedStyle(svg.firstElementChild).fill,
+      bars: [...svg.querySelectorAll('g rect')].map(rect => getComputedStyle(rect).fill),
+      inlineStyles: (svg.hasAttribute('style') ? 1 : 0) + svg.querySelectorAll('[style]').length,
+    })));
+    assert.equal(labels.length, 3, `${media}: all labels exist`);
+    for (const label of labels) {
+      assert.equal(label.background, 'rgb(255, 255, 255)', `${media}: barcode background must remain white under CSP`);
+      assert(label.bars.length > 20, `${media}: barcode contains individual bars`);
+      assert(label.bars.every(fill => fill === 'rgb(0, 0, 0)'), `${media}: bars must remain black`);
+      assert.equal(label.inlineStyles, 0, `${media}: barcode must not rely on blocked inline CSS`);
+    }
+  };
   try {
     await page.goto(base);
     await page.locator('#app-password').fill('local-e2e-password-only');
@@ -189,10 +203,20 @@ const output = path.resolve(__dirname, '../../test-results/browser');
     await page.evaluate(()=>{window.print=()=>{window.__printed=true;};});
     await page.getByRole('button',{name:'Tlačiť všetky',exact:true}).click();
     assert.equal(await page.locator('#print-labels svg').count(),3);
+    await assertBarcodeColors('screen');
     await page.emulateMedia({media:'print'});
+    await assertBarcodeColors('A4 print');
+    assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).backgroundColor),'rgb(255, 255, 255)');
     await page.pdf({path:path.join(output, 'sps-labels-test.pdf'),preferCSSPageSize:true,printBackground:true});
     await page.locator('#print-labels svg').first().screenshot({path:path.join(output, 'location-barcode.png')});
     await fs.writeFile(path.join(output, 'expected-barcode.txt'),data.locations[0].barcode);
+    await fs.writeFile(path.join(output, 'printed-barcodes.json'),JSON.stringify(data.locations.map(place=>place.barcode)));
+    await page.emulateMedia({media:'screen'});
+    await page.locator('#label-format').selectOption('label');
+    await page.getByRole('button',{name:'Tlačiť všetky',exact:true}).click();
+    await page.emulateMedia({media:'print'});
+    await assertBarcodeColors('thermal print');
+    await page.pdf({path:path.join(output, 'sps-labels-thermal-test.pdf'),preferCSSPageSize:true,printBackground:true});
     await page.emulateMedia({media:'screen'});
     await shot('sps-locations-mobile');
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
