@@ -139,6 +139,7 @@ export class WarehouseWorkspace {
 
   async open(view) {
     if (this.state.preparing || this.state.receiving || this.returnBusy || this.busy || this.viewLoading) return;
+    if (view !== this.view) this.notice('');
     this.viewLoading = true; this.stopInput(); this.viewGeneration++; this.view = view; this.activeNumber = null; this.activeLocation = null; this.batchLocation = null; this.inventory = null;
     this.setNav(); this.render();
     this.feedback(view === 'store' ? 'Naskenuj balík alebo čiarový kód miesta.' : view === 'pickup' ? 'Najprv zadaj kód od zákazníka.' : view === 'returns' ? 'Vyber ťuknutím, skenom alebo hlasom balíky na odovzdanie kuriérovi.' : 'Pripravené na skenovanie.');
@@ -243,7 +244,7 @@ export class WarehouseWorkspace {
     heading.append(tail, info); card.append(heading);
     const status = el('p', statuses[parcel.carrier_status] || parcel.carrier_status, `status-label ${parcel.carrier_status !== 'accepted' ? 'attention' : ''}`); card.append(status);
     if (parcel.pending_operation) card.append(el('p', parcel.pending_operation.outcome === 'pending' ? 'Operácia prebieha alebo čaká na overenie v SPS.' : 'Výsledok operácie nie je známy. Najprv ho over v SPS.', 'warning-note'));
-    if (parcel.expires_at) card.append(el('p', `SPS: do ${parcel.expires_at}${parcel.expiry_synced_at ? ` · overené ${this.formatTime(parcel.expiry_synced_at)}` : ''}`, 'muted'));
+    if (parcel.expires_at) card.append(el('p', `SPS: do ${this.formatTime(parcel.expires_at)}${parcel.expiry_synced_at ? ` · overené ${this.formatTime(parcel.expiry_synced_at)}` : ''}`, 'muted'));
     if (suffixCollisions(this.activeParcels().filter(p => p.location_id === parcel.location_id), parcel.number).length) card.append(el('p', 'Na tomto mieste je viac balíkov s rovnakou koncovkou. Over celý kód.', 'warning-note'));
     if (parcel.photo_url && detailed) { const image = el('img', '', 'parcel-photo'); image.src = parcel.photo_url; image.alt = `Balík ${parcel.number}`; card.append(image); }
     if (actions) {
