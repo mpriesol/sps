@@ -238,7 +238,7 @@ def create_app(settings=None, sps=None, static_dir=None):
         if parcel and parcel["carrier_status"] == "accepted":
             # A browser retry or another phone must never repeat an acknowledged write.
             return {"number": number, "accepted": True, "already_accepted": True, "password_saved": True}
-        if parcel and parcel["carrier_status"] in {"delivered", "returned", "delivery_uncertain", "return_uncertain"}:
+        if parcel and parcel["carrier_status"] in {"delivered", "returned", "dropoff_uncertain", "delivery_uncertain", "return_uncertain"}:
             raise HTTPException(409, "Balík už bol vydaný alebo čaká na overenie výdaja. Nemožno ho znovu prijať.")
         password = body.password.get_secret_value() if body.password is not None else passwords.password(courier["id"])
         if password is None:

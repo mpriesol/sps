@@ -21,10 +21,11 @@ from urllib.parse import quote
 
 DEFAULT_SETTINGS = {
     "courier_warning": True, "photos": False, "return_staging": False,
-    "receipt_place": False, "last_courier_id": None,
+    "receipt_place": False, "manual_entry": False, "pickup_scan_required": False,
+    "last_courier_id": None,
 }
 TERMINAL = {"delivered", "returned"}
-CARRIER_STATES = {"unconfirmed", "accepted", "accept_uncertain", "delivery_uncertain", "return_uncertain", *TERMINAL}
+CARRIER_STATES = {"unconfirmed", "accepted", "accept_uncertain", "dropoff_uncertain", "delivery_uncertain", "return_uncertain", *TERMINAL}
 PHOTO_MAX_EDGE = 640
 PHOTO_MAX_BYTES = 40 * 1024
 PHOTO_QUALITIES = (70, 58, 46)
@@ -155,6 +156,16 @@ class Warehouse:
         p["carrier_data"] = json.loads(p["carrier_data"])
         pending = db.execute("SELECT operation_id,kind,outcome,created_at,updated_at FROM carrier_operations WHERE number=? AND outcome IN ('pending','uncertain') ORDER BY created_at DESC LIMIT 1", (p["number"],)).fetchone()
         p["pending_operation"] = dict(pending) if pending else None
+        p["dropoff_confirmed"] = bool(db.execute("SELECT 1 FROM carrier_operations WHERE number=? AND kind='dropoff' AND outcome='confirmed' LIMIT 1", (p["number"],)).fetchone())
+        # Import time is not a physical receipt or scan. Old registrations also
+        # came from tile selection, so only explicit scan events count as scans.
+        p["received_at"] = None
+        p["scanned_at"] = None
+        for event in db.execute("SELECT type,created_at,details FROM events WHERE number=? AND type IN ('scanned','carrier_accepted','carrier_intake_confirmed') ORDER BY id", (p["number"],)):
+            if event["type"] == "scanned":
+                p["scanned_at"] = p["scanned_at"] or event["created_at"]
+            elif not json.loads(event["details"]).get("verified_manually"):
+                p["received_at"] = p["received_at"] or event["created_at"]
         return p
 
     def _event(self, row):
@@ -290,17 +301,19 @@ class Warehouse:
         with self._db() as db:
             return self._parcel(self._find(db, number, required=False), db)
 
-    def register_parcel(self, number, sender_name="", actor="Obsluha"):
+    def register_parcel(self, number, sender_name="", actor="Obsluha", scanned=False):
         number = parcel_number(number)
         if not isinstance(sender_name, str) or len(sender_name) > 500:
             raise WarehouseError(422, "Neplatný odosielateľ.")
         with self._db(write=True) as db:
             row = self._find(db, number, required=False)
-            if row:
-                return self._parcel(row, db)
-            timestamp = now()
-            db.execute("INSERT INTO parcels(number,sender_name,created_at,updated_at) VALUES(?,?,?,?)", (number, sender_name.strip(), timestamp, timestamp))
-            self._add_event(db, number, "registered", actor, None, None, 1)
+            if row is None:
+                timestamp = now()
+                db.execute("INSERT INTO parcels(number,sender_name,created_at,updated_at) VALUES(?,?,?,?)", (number, sender_name.strip(), timestamp, timestamp))
+                self._add_event(db, number, "registered", actor, None, None, 1)
+                row = self._find(db, number)
+            if scanned and not db.execute("SELECT 1 FROM events WHERE number=? AND type='scanned' LIMIT 1", (number,)).fetchone():
+                self._add_event(db, number, "scanned", actor, row["location_id"], row["location_id"], row["version"])
             return self._parcel(self._find(db, number), db)
 
     def _assert_movable(self, parcel, version, db=None):
@@ -433,11 +446,17 @@ class Warehouse:
                 if expiry is not None:
                     expiry = str(expiry)[:100]
                 data = {key: item[key] for key in ("recipientName", "statusCode", "statusLabel", "statusDate", "cod", "psRemark", "returnEligible", "entryCourier", "handoverKind") if key in item}
+                # A confirmed customer intake is evidence of direction even if
+                # a later compact read omits event metadata. This never adds a
+                # parcel to the remote courier queue or makes it eligible.
+                if data.get("handoverKind") not in {"outgoing", "return"} and db.execute("SELECT 1 FROM carrier_operations WHERE number=? AND kind='dropoff' AND outcome='confirmed' LIMIT 1", (number,)).fetchone():
+                    data["handoverKind"] = "outgoing"
                 if row is None:
                     db.execute("INSERT INTO parcels(number,sender_name,carrier_status,expires_at,expiry_source,expiry_synced_at,created_at,updated_at,carrier_data) VALUES(?,?,?,?,?,?,?,?,?)", (number, sender, "accepted", expiry, source, timestamp, timestamp, timestamp, json.dumps(data, ensure_ascii=False)))
                     self._add_event(db, number, "carrier_sync", actor, None, None, 1, {"source": source})
                 elif row["carrier_status"] not in TERMINAL:
-                    next_status = "accepted" if row["carrier_status"] in {"unconfirmed", "accept_uncertain"} else row["carrier_status"]
+                    pending_dropoff = db.execute("SELECT 1 FROM carrier_operations WHERE number=? AND kind='dropoff' AND outcome IN ('pending','uncertain') LIMIT 1", (number,)).fetchone()
+                    next_status = "accepted" if row["carrier_status"] in {"unconfirmed", "accept_uncertain"} and not pending_dropoff else row["carrier_status"]
                     changes = sender != row["sender_name"] or expiry != row["expires_at"] or next_status != row["carrier_status"] or json.dumps(data, ensure_ascii=False, sort_keys=True) != json.dumps(json.loads(row["carrier_data"]), ensure_ascii=False, sort_keys=True)
                     db.execute("UPDATE parcels SET sender_name=?,carrier_status=?,expires_at=?,expiry_source=?,expiry_synced_at=?,carrier_data=?,version=version+?,updated_at=CASE WHEN ? THEN ? ELSE updated_at END WHERE number=?", (sender, next_status, expiry, source, timestamp, json.dumps(data, ensure_ascii=False), int(changes), int(changes), timestamp, number))
                     if changes:
@@ -473,7 +492,7 @@ class Warehouse:
 
     def begin_carrier_operation(self, number, kind, operation_id):
         number = parcel_number(number)
-        if kind not in {"accept", "deliver", "return"} or not isinstance(operation_id, str) or not 8 <= len(operation_id) <= 128:
+        if kind not in {"accept", "dropoff", "deliver", "return"} or not isinstance(operation_id, str) or not 8 <= len(operation_id) <= 128:
             raise WarehouseError(422, "Neplatná operácia dopravcu.")
         with self._db(write=True) as db:
             parcel = self._find(db, number)
@@ -490,6 +509,8 @@ class Warehouse:
             completed = db.execute("SELECT * FROM carrier_operations WHERE number=? AND kind=? AND outcome='confirmed' ORDER BY created_at DESC LIMIT 1", (number, kind)).fetchone()
             if completed:
                 return {**dict(completed), "replayed": True}
+            if kind == "dropoff" and parcel["carrier_status"] != "unconfirmed":
+                raise WarehouseError(409, "Balík už má potvrdený alebo neoverený príjem. Nové zákaznícke podanie je zablokované.")
             if parcel["carrier_status"] in TERMINAL:
                 raise WarehouseError(409, "Balík už bol odovzdaný; ďalšia operácia je zablokovaná.")
             timestamp = now()
@@ -507,6 +528,12 @@ class Warehouse:
                 raise WarehouseError(409, "Potvrdenú operáciu nemožno prepísať.")
             if carrier_status is not None:
                 self._mark_carrier(db, row["number"], carrier_status, actor, details)
+            if outcome == "confirmed" and row["outcome"] != "confirmed" and row["kind"] in {"accept", "dropoff"}:
+                parcel = self._find(db, row["number"])
+                if row["kind"] == "dropoff":
+                    data = {**json.loads(parcel["carrier_data"]), "handoverKind": "outgoing"}
+                    db.execute("UPDATE parcels SET carrier_data=? WHERE number=?", (json.dumps(data, ensure_ascii=False), row["number"]))
+                self._add_event(db, row["number"], "carrier_intake_confirmed", actor, parcel["location_id"], parcel["location_id"], parcel["version"], {"operation_id": operation_id, "intake_kind": row["kind"]})
             db.execute("UPDATE carrier_operations SET outcome=?,error=?,updated_at=? WHERE operation_id=?", (outcome, str(error)[:500], now(), operation_id))
             parcel = self._parcel(self._find(db, row["number"]), db)
             return {**dict(db.execute("SELECT * FROM carrier_operations WHERE operation_id=?", (operation_id,)).fetchone()), "parcel": parcel}
@@ -518,7 +545,7 @@ class Warehouse:
         The API layer must require an explicit confirmation and audit note.
         """
         number = parcel_number(number)
-        if kind not in {"accept", "deliver", "return"} or outcome not in {"confirmed", "failed"}:
+        if kind not in {"accept", "dropoff", "deliver", "return"} or outcome not in {"confirmed", "failed"}:
             raise WarehouseError(422, "Vyberte overený výsledok operácie v SPS.")
         if not isinstance(note, str) or not 5 <= len(note.strip()) <= 500:
             raise WarehouseError(422, "Doplňte poznámku k overeniu v SPS.")
@@ -526,9 +553,12 @@ class Warehouse:
             operation = db.execute("SELECT * FROM carrier_operations WHERE number=? AND kind=? AND outcome IN ('pending','uncertain') ORDER BY created_at DESC LIMIT 1", (number, kind)).fetchone()
             if not operation:
                 raise WarehouseError(409, "Balík už nemá túto neoverenú operáciu. Obnovte údaje.")
-            status = {"accept": "accepted", "deliver": "delivered", "return": "returned"}[kind] if outcome == "confirmed" else ("unconfirmed" if kind == "accept" else "accepted")
+            status = {"accept": "accepted", "dropoff": "accepted", "deliver": "delivered", "return": "returned"}[kind] if outcome == "confirmed" else ("unconfirmed" if kind in {"accept", "dropoff"} else "accepted")
             details = {"operation_id": operation["operation_id"], "verified_manually": True, "note": note.strip(), "outcome": outcome}
             parcel = self._mark_carrier(db, number, status, actor, details)
+            if kind == "dropoff" and outcome == "confirmed":
+                data = {**parcel["carrier_data"], "handoverKind": "outgoing"}
+                db.execute("UPDATE parcels SET carrier_data=? WHERE number=?", (json.dumps(data, ensure_ascii=False), number))
             db.execute("UPDATE carrier_operations SET outcome=?,error='',updated_at=? WHERE operation_id=?", (outcome, now(), operation["operation_id"]))
             self._add_event(db, number, "carrier_verified", actor, parcel["location_id"], parcel["location_id"], parcel["version"], details)
             parcel = self._parcel(self._find(db, number), db)

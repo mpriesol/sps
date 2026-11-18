@@ -28,6 +28,8 @@ class ObservedDemo(DemoSPS):
         self.deliveries = []
         self.returns = []
         self.acceptances = []
+        self.dropoffs = []
+        self.refreshes = []
         self.receipts = []
         self.pickups = []
         self.expired_reads = 0
@@ -35,18 +37,50 @@ class ObservedDemo(DemoSPS):
         self.return_error = None
         self.accept_error = None
         self.receipt_error = None
+        self.dropoff_error = None
+        self.dropoff_applies_before_error = False
+        self.refresh_error = None
+        self.pickup_error = None
         self.terminal_allowed = True
         self.courier_choices = None
         self.delivery_started = threading.Event()
         self.delivery_release = threading.Event()
         self.block_delivery = False
+        self.dropoff_started = threading.Event()
+        self.dropoff_release = threading.Event()
+        self.block_dropoff = False
 
     async def lookup_pickup(self, pin):
         self.pickups.append(pin)
+        if self.pickup_error:
+            raise self.pickup_error
         parcel = await super().lookup_pickup(pin)
         if parcel:
             parcel["paymentTerminalAllowed"] = self.terminal_allowed
         return parcel
+
+    async def refresh_cod(self, number):
+        self.refreshes.append(number)
+        if self.refresh_error:
+            raise self.refresh_error
+        return await super().refresh_cod(number)
+
+    async def dropoff(self, number):
+        self.dropoffs.append(number)
+        self.dropoff_started.set()
+        if self.block_dropoff:
+            for _ in range(1000):
+                if self.dropoff_release.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("Test did not release the blocked demo dropoff")
+        if self.dropoff_applies_before_error:
+            await super().dropoff(number)
+        if self.dropoff_error:
+            raise self.dropoff_error
+        if not self.dropoff_applies_before_error:
+            return await super().dropoff(number)
 
     async def deliver(self, pin, cod_confirmed=False, paid_with_terminal=False):
         self.deliveries.append((pin, cod_confirmed, paid_with_terminal))
@@ -149,6 +183,12 @@ def accept(client, headers, number="DEMO00000001", **overrides):
     }, headers=headers)
 
 
+def dropoff(client, headers, number="DEMODROPOFF01", **overrides):
+    return client.post(PREFIX + "dropoff/confirm", json={
+        "number": number, "operation_id": uuid.uuid4().hex, **overrides,
+    }, headers=headers)
+
+
 def test_pin_lookup_is_read_only_and_shows_location_and_visible_suffix(workflow):
     client, demo, warehouse, headers = workflow
     location = place(warehouse, "DEMOSTORED01")
@@ -238,7 +278,7 @@ def test_account_without_terminal_cannot_select_terminal(workflow):
 
 def test_zero_cod_delivery_requires_no_payment_and_creates_no_receipt(workflow):
     client, demo, warehouse, headers = workflow
-    result = lookup(client, headers, "222222")
+    result = lookup(client, headers, "222223")
     response = confirm(client, headers, result)
     assert response.status_code == 200
     assert warehouse.get_parcel("DEMOEXPIRED01")["carrier_status"] == "delivered"
@@ -547,3 +587,292 @@ def test_unknown_carrier_type_is_visible_as_unknown_without_altering_eligibility
     assert [p['trackNumber'] for p in response.json()['unclassified']] == ['DEMOEXPIRED01']
     prepare_return(client, headers, 'DEMOEXPIRED01')
     assert return_parcel(client, headers, 'DEMOEXPIRED01').status_code == 200
+
+
+def test_manual_entry_and_pickup_scan_defaults_persist_as_account_settings(workflow):
+    client, _, warehouse, headers = workflow
+    defaults = client.get(PREFIX + "warehouse").json()["settings"]
+    assert defaults["manual_entry"] is False and defaults["pickup_scan_required"] is False
+    response = client.post(PREFIX + "settings", json={"manual_entry": True, "pickup_scan_required": True}, headers=headers)
+    assert response.status_code == 200
+    restarted = type(warehouse)(warehouse.path)
+    assert restarted.get_settings()["manual_entry"] is True
+    assert restarted.get_settings()["pickup_scan_required"] is True
+
+
+def test_optional_pickup_scan_omission_still_requires_pin_and_explicit_cash(workflow):
+    client, demo, _, headers = workflow
+    found = lookup(client, headers)
+    assert found["scan_required"] is False
+    body = {"lookup_id": found["lookup_id"], "operation_id": uuid.uuid4().hex}
+    assert client.post(PREFIX + "pickup/confirm", json=body, headers=headers).status_code == 422
+    body["cod_confirmed"] = True
+    response = client.post(PREFIX + "pickup/confirm", json=body, headers=headers)
+    assert response.status_code == 200, response.text
+    assert demo.deliveries == [("111111", True, False)]
+
+
+def test_server_scan_setting_is_enforced_even_when_changed_after_lookup(workflow):
+    client, demo, _, headers = workflow
+    found = lookup(client, headers)
+    client.post(PREFIX + "settings", json={"pickup_scan_required": True}, headers=headers)
+    body = {"lookup_id": found["lookup_id"], "operation_id": uuid.uuid4().hex, "cod_confirmed": True}
+    assert client.post(PREFIX + "pickup/confirm", json=body, headers=headers).status_code == 409
+    body["scanned_number"] = "01"
+    assert client.post(PREFIX + "pickup/confirm", json=body, headers=headers).status_code == 409
+    assert demo.deliveries == []
+    body["scanned_number"] = found["parcel"]["trackNumber"]
+    assert client.post(PREFIX + "pickup/confirm", json=body, headers=headers).status_code == 200
+
+
+def test_explicit_mobile_refresh_obtains_authoritative_zero_without_terminal_flag(workflow):
+    client, demo, warehouse, headers = workflow
+    location = place(warehouse, "DEMOMOBILE01")
+    found = lookup(client, headers, "222222")
+    assert found["parcel"]["cod"] == 18.90
+    refreshed = client.post(PREFIX + "pickup/refresh", json={"lookup_id": found["lookup_id"]}, headers=headers)
+    assert refreshed.status_code == 200, refreshed.text
+    result = refreshed.json()
+    assert result["lookup_id"] == found["lookup_id"] and result["amount_changed"] is True
+    assert result["parcel"]["cod"] == 0 and result["local"]["carrier_data"]["cod"] == 0
+    assert result["local"]["location_id"] == location["id"]
+    assert "222222" not in str(result) and "pin" not in result
+    assert demo.refreshes == ["DEMOMOBILE01"] and demo.deliveries == []
+    assert confirm(client, headers, result, paid_with_terminal=True).status_code == 422
+    delivered = client.post(PREFIX + "pickup/confirm", json={"lookup_id": found["lookup_id"], "operation_id": uuid.uuid4().hex}, headers=headers)
+    assert delivered.status_code == 200, delivered.text
+    assert demo.deliveries == [("222222", False, False)] and demo.receipts == []
+    assert warehouse.get_parcel("DEMOMOBILE01")["location_id"] is None
+    assert client.post(PREFIX + "pickup/refresh", json={"lookup_id": found["lookup_id"]}, headers=headers).status_code == 409
+    assert demo.refreshes == ["DEMOMOBILE01"]
+
+
+def test_refresh_does_not_treat_not_paid_or_unchanged_amount_as_zero(workflow):
+    client, demo, _, headers = workflow
+    found = lookup(client, headers)
+    response = client.post(PREFIX + "pickup/refresh", json={"lookup_id": found["lookup_id"]}, headers=headers)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["amount_changed"] is False and result["parcel"]["cod"] == 12.50
+    assert confirm(client, headers, result).status_code == 422
+    assert demo.deliveries == []
+
+
+@pytest.mark.parametrize("failure_stage", ["check", "details", "identity", "stock"])
+def test_failed_refresh_preserves_original_baseline_until_explicit_success(workflow, failure_stage, monkeypatch):
+    client, demo, _, headers = workflow
+    found = lookup(client, headers, "222222")
+    if failure_stage == "check":
+        demo.refresh_error = SPSError("Kontrola platby nedostupná")
+        demo.parcels["DEMOMOBILE01"]["cod"] = 0
+    elif failure_stage == "details":
+        demo.pickup_error = SPSError("Neplatná odpoveď lookupu")
+    elif failure_stage == "identity":
+        demo.pins["222222"] = "DEMOEXPIRED01"
+    else:
+        original = demo.stored_shipments
+        async def missing(number=""):
+            return []
+        monkeypatch.setattr(demo, "stored_shipments", missing)
+    response = client.post(PREFIX + "pickup/refresh", json={"lookup_id": found["lookup_id"]}, headers=headers)
+    assert response.status_code in {409, 502}, response.text
+    demo.refresh_error = None
+    demo.pickup_error = None
+    demo.pins["222222"] = "DEMOMOBILE01"
+    if failure_stage == "stock":
+        monkeypatch.setattr(demo, "stored_shipments", original)
+    assert demo.parcels["DEMOMOBILE01"]["cod"] == 0
+    # The old lookup must still reject the newly changed amount after failure.
+    assert confirm(client, headers, found).status_code == 409
+    assert demo.deliveries == []
+    refreshed = client.post(PREFIX + "pickup/refresh", json={"lookup_id": found["lookup_id"]}, headers=headers)
+    assert refreshed.status_code == 200 and refreshed.json()["amount_changed"] is True
+    assert confirm(client, headers, refreshed.json()).status_code == 200
+
+
+def test_pickup_refresh_keeps_session_pin_private_and_rejects_another_login(workflow):
+    client, demo, _, headers = workflow
+    found = lookup(client, headers, "222222")
+    other = login(client)
+    response = client.post(PREFIX + "pickup/refresh", json={"lookup_id": found["lookup_id"]}, headers=other)
+    assert response.status_code == 409 and demo.refreshes == []
+
+
+def test_dropoff_scan_is_local_until_explicit_confirmation_then_handover_uses_sps_queue(workflow):
+    client, demo, warehouse, headers = workflow
+    number = "DEMODROPOFF01"
+    registered = client.post(PREFIX + "parcels/register", json={"number": number, "scanned": True}, headers=headers)
+    parcel = registered.json()["parcel"]
+    assert parcel["scanned_at"] and parcel["received_at"] is None and parcel["dropoff_confirmed"] is False
+    location = place(warehouse, number)
+    assert demo.dropoffs == []
+    assert number not in [p["trackNumber"] for p in client.get(PREFIX + "returns").json()["parcels"]]
+    response = dropoff(client, headers, scanned=True)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["accepted"] is True and result["local_saved"] is True
+    local = result["parcel"]
+    assert local["dropoff_confirmed"] is True and local["received_at"]
+    assert local["carrier_data"]["handoverKind"] == "outgoing"
+    assert local["carrier_status"] == "accepted" and local["location_id"] == location["id"]
+    outgoing = client.get(PREFIX + "returns").json()["outgoing"]
+    assert number in [p["trackNumber"] for p in outgoing]
+    assert demo.dropoffs == [number]
+    prepare_return(client, headers, number)
+    assert return_parcel(client, headers, number).status_code == 200
+    assert warehouse.get_parcel(number)["location_id"] is None
+    assert warehouse.get_parcel(number)["dropoff_confirmed"] is True
+    assert dropoff(client, headers, number).status_code == 409
+
+
+def test_successful_dropoff_same_or_new_id_never_resends_or_leaves_pending_journal(workflow):
+    client, demo, warehouse, headers = workflow
+    op = uuid.uuid4().hex
+    first = dropoff(client, headers, operation_id=op)
+    same = dropoff(client, headers, operation_id=op)
+    new = dropoff(client, headers)
+    assert all(r.status_code == 200 for r in (first, same, new))
+    assert same.json()["replayed"] is True and new.json()["already_accepted"] is True
+    assert demo.dropoffs == ["DEMODROPOFF01"]
+    restarted = type(warehouse)(warehouse.path)
+    assert restarted.get_parcel("DEMODROPOFF01")["dropoff_confirmed"] is True
+    assert restarted.get_parcel("DEMODROPOFF01")["pending_operation"] is None
+    assert dropoff(client, headers, "DEMODROPOFF02", operation_id=op).status_code == 409
+    assert demo.dropoffs == ["DEMODROPOFF01"]
+
+
+def test_dropoff_explicit_rejection_preserves_location_and_requires_new_attempt_id(workflow):
+    client, demo, warehouse, headers = workflow
+    warehouse.register_parcel("DEMODROPOFF01", scanned=True)
+    location = place(warehouse, "DEMODROPOFF01")
+    demo.dropoff_error = SPSError("SPS číslo neprijalo")
+    op = uuid.uuid4().hex
+    rejected = dropoff(client, headers, operation_id=op)
+    assert rejected.status_code == 502 and rejected.json()["outcome"] == "rejected"
+    local = warehouse.get_parcel("DEMODROPOFF01")
+    assert local["carrier_status"] == "unconfirmed" and local["location_id"] == location["id"]
+    assert local["received_at"] is None and local["dropoff_confirmed"] is False
+    assert local["pending_operation"] is None
+    demo.dropoff_error = None
+    assert dropoff(client, headers, operation_id=op).status_code == 409
+    assert dropoff(client, headers).status_code == 200
+    assert len(demo.dropoffs) == 2
+
+
+@pytest.mark.parametrize("actually_applied", [False, True])
+def test_uncertain_dropoff_durable_guard_cannot_be_cleared_by_import_or_automatic_retry(workflow, actually_applied):
+    client, demo, warehouse, headers = workflow
+    warehouse.register_parcel("DEMODROPOFF01", scanned=True)
+    location = place(warehouse, "DEMODROPOFF01")
+    demo.dropoff_applies_before_error = actually_applied
+    demo.dropoff_error = OperationUncertainError("Spojenie prerušilo odpoveď")
+    op = uuid.uuid4().hex
+    response = dropoff(client, headers, operation_id=op)
+    assert response.status_code == 502 and response.json()["outcome"] == "uncertain"
+    client.get(PREFIX + "warehouse/sync")
+    client.get(PREFIX + "returns")
+    local = type(warehouse)(warehouse.path).get_parcel("DEMODROPOFF01")
+    assert local["carrier_status"] == "dropoff_uncertain"
+    assert local["pending_operation"]["operation_id"] == op and local["pending_operation"]["kind"] == "dropoff"
+    assert local["dropoff_confirmed"] is False and local["received_at"] is None
+    assert local["location_id"] == location["id"]
+    assert dropoff(client, headers, operation_id=op).status_code == 409
+    assert dropoff(client, headers).status_code == 409
+    assert demo.dropoffs == ["DEMODROPOFF01"]
+    resolution = {"number": "DEMODROPOFF01", "kind": "dropoff", "outcome": "confirmed" if actually_applied else "failed",
+                  "verified_in_sps": False, "note": "Výsledok bol osobne overený v portáli SPS."}
+    assert client.post(PREFIX + "operations/resolve", json=resolution, headers=headers).status_code == 422
+    resolution["verified_in_sps"] = True
+    resolved = client.post(PREFIX + "operations/resolve", json=resolution, headers=headers)
+    assert resolved.status_code == 200, resolved.text
+    local = resolved.json()["parcel"]
+    assert local["location_id"] == location["id"] and local["received_at"] is None
+    assert local["dropoff_confirmed"] is actually_applied
+    demo.dropoff_error = None
+    demo.dropoff_applies_before_error = False
+    assert dropoff(client, headers).status_code == 200
+    assert len(demo.dropoffs) == (1 if actually_applied else 2)
+
+
+def test_existing_sps_intake_cannot_be_reclassified_by_another_customer_dropoff(workflow):
+    client, demo, warehouse, headers = workflow
+    assert dropoff(client, headers, "DEMOSTORED01").status_code == 409
+    # Also protect a remote parcel not yet imported by this application.
+    demo.parcels["DEMODROPOFF99"] = demo._demo_parcel("DEMODROPOFF99", outgoing=True)
+    assert dropoff(client, headers, "DEMODROPOFF99").status_code == 409
+    local = warehouse.get_parcel("DEMODROPOFF99")
+    assert local["carrier_status"] == "accepted" and local["received_at"] is None
+    assert local["dropoff_confirmed"] is False and demo.dropoffs == []
+
+
+def test_dropoff_full_code_intent_guard_rejects_suffix_or_location(workflow):
+    client, demo, _, headers = workflow
+    for number in ("01", "   01   ", "LOC-ABC123", "ABC/123"):
+        assert dropoff(client, headers, number).status_code == 422
+    assert demo.dropoffs == []
+
+
+def test_dropoff_preflight_race_checks_local_state_atomically_before_remote_write(workflow, monkeypatch):
+    client, demo, warehouse, headers = workflow
+    number = "DEMODROPOFF01"
+    warehouse.register_parcel(number)
+    location = place(warehouse, number)
+    async def stale_read(number=""):
+        warehouse.mark_carrier(number, "accepted", details={"source": "concurrent receipt"})
+        return []
+    monkeypatch.setattr(demo, "stored_shipments", stale_read)
+    response = dropoff(client, headers)
+    assert response.status_code == 409
+    assert demo.dropoffs == []
+    local = warehouse.get_parcel(number)
+    assert local["carrier_status"] == "accepted" and local["location_id"] == location["id"]
+    assert local["pending_operation"] is None and local["dropoff_confirmed"] is False
+
+
+def test_pending_customer_intake_blocks_duplicates_and_manual_resolution_while_running(workflow):
+    client, demo, warehouse, headers = workflow
+    demo.block_dropoff = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(dropoff, client, headers)
+        try:
+            assert demo.dropoff_started.wait(timeout=3)
+            assert dropoff(client, headers).status_code == 409
+            response = client.post(PREFIX + "operations/resolve", json={
+                "number": "DEMODROPOFF01", "kind": "dropoff", "outcome": "confirmed",
+                "note": "Počas bežiaceho zápisu nemožno rozhodnúť výsledok.", "verified_in_sps": True,
+            }, headers=headers)
+            assert response.status_code == 409
+        finally:
+            demo.dropoff_release.set()
+        assert future.result(timeout=5).status_code == 200
+    assert demo.dropoffs == ["DEMODROPOFF01"]
+    assert warehouse.get_parcel("DEMODROPOFF01")["pending_operation"] is None
+
+
+def test_confirmed_local_dropoff_classifies_only_parcels_present_in_sps_queue(workflow):
+    client, demo, warehouse, headers = workflow
+    assert dropoff(client, headers).status_code == 200
+    # Compact SPS metadata may omit direction; our confirmed intake is proof.
+    demo.parcels["DEMODROPOFF01"]["handoverKind"] = "unknown"
+    demo.parcels["DEMODROPOFF01"]["expiredDate"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    queue = client.get(PREFIX + "returns").json()
+    assert "DEMODROPOFF01" in [p["trackNumber"] for p in queue["outgoing"]]
+    assert warehouse.get_parcel("DEMODROPOFF01")["carrier_data"]["handoverKind"] == "outgoing"
+    demo.parcels.pop("DEMODROPOFF01")
+    assert "DEMODROPOFF01" not in [p["trackNumber"] for p in client.get(PREFIX + "returns").json()["parcels"]]
+
+
+def test_received_and_scanned_dates_use_real_events_not_import_creation(workflow):
+    client, _, warehouse, headers = workflow
+    imported = warehouse.get_parcel("DEMOSTORED01")
+    assert imported["created_at"] and imported["expiry_synced_at"]
+    assert imported["received_at"] is None and imported["scanned_at"] is None
+    local = client.post(PREFIX + "parcels/register", json={"number": "DEMO00000001"}, headers=headers).json()["parcel"]
+    assert local["received_at"] is None and local["scanned_at"] is None
+    scanned = client.post(PREFIX + "parcels/register", json={"number": "DEMO00000001", "scanned": True}, headers=headers).json()["parcel"]
+    assert scanned["scanned_at"] and scanned["received_at"] is None
+    client.post(PREFIX + "parcels/register", json={"number": "DEMO00000001", "scanned": True}, headers=headers)
+    assert len([e for e in warehouse.history("DEMO00000001") if e["type"] == "scanned"]) == 1
+    prepare_receipt(client, headers)
+    assert accept(client, headers).status_code == 200
+    assert warehouse.get_parcel("DEMO00000001")["received_at"]

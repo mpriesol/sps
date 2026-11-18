@@ -42,9 +42,19 @@ export function matchSpokenSuffix(transcript, shipments, selected) {
   return { kind: 'match', suffix, code: matches[0] };
 }
 
-export function matchSpokenFullCode(transcript, shipments, selected = new Map()) {
+export function matchSpokenFullCode(transcript, shipments, selected = new Map(), { allowUnknown = false } = {}) {
   const literal = typeof transcript === 'string' ? normalizeCode(transcript) : '';
   const codes = new Set([...shipments.keys(), ...selected.keys()].map(normalizeCode));
+  if (allowUnknown) {
+    // A new customer dropoff has no catalog yet. Require full-code intent and
+    // safe characters, but leave real carrier validity to SPS after confirmation.
+    // Do not turn an ordinary recognized word into an arbitrary parcel number.
+    const direct = /^[A-Z0-9][A-Z0-9._-]*$/.test(literal) && (/\d/.test(literal) || codes.has(literal));
+    const code = direct ? literal : spokenSuffix(transcript);
+    if (!code || code.startsWith('LOC-') || !/^[A-Z0-9][A-Z0-9._-]{0,99}$/.test(code)) return { kind: 'invalid', suffix: code || null };
+    if (code.length < 6 || (!codes.has(code) && [...codes].some(number => number.endsWith(code)))) return { kind: 'incomplete', suffix: code };
+    return { kind: 'match', code, suffix: code };
+  }
   if (codes.has(literal)) return { kind: 'match', code: literal, suffix: literal };
   const code = spokenSuffix(transcript);
   if (!code) return { kind: 'invalid', suffix: null };

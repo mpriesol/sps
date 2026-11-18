@@ -96,7 +96,7 @@ class SPSClient:
     transport: Any = None
 
     capabilities = {"stored_shipments": True, "pickup_lookup": True, "delivery": True, "returns": True,
-                    "receipts": True, "payment_request": False}
+                    "dropoff": True, "pickup_refresh": True, "receipts": True, "payment_request": False}
 
     def __post_init__(self):
         self.http = httpx.AsyncClient(
@@ -109,6 +109,7 @@ class SPSClient:
         )
         self.logged_in = False
         self.payment_terminal = False
+        self.dropoff_allowed = False
         self._handover_statuses = {}
         self._handover_statuses_checked = None
         self.lock = asyncio.Lock()
@@ -126,6 +127,7 @@ class SPSClient:
                 raise SPSError("SPS účet nemá priradené výdajné miesto. Overte ho v portáli SPS.")
             parcelshop = user["parcelshop"]
             self.payment_terminal = isinstance(parcelshop, dict) and parcelshop.get("paymentTerminal") is True
+            self.dropoff_allowed = isinstance(parcelshop, dict) and parcelshop.get("supportdropoff") is True
         except (httpx.HTTPError, ValueError) as exc:
             raise SPSError("SPS prihlásenie nie je dostupné alebo vrátilo neočakávanú odpoveď.") from exc
         self.logged_in = True
@@ -189,6 +191,27 @@ class SPSClient:
         parcel["paymentTerminalAllowed"] = self.payment_terminal
         return parcel
 
+    async def refresh_cod(self, number):
+        """Ask SPS to check existing payment; this never starts a payment.
+
+        The portal treats 204 as not paid yet. Neither that status nor any
+        success response is an amount: callers must then read shipment details.
+        """
+        async with self.lock:
+            try:
+                if not self.logged_in:
+                    await self._login()
+                params = {"trackNumber": normalize_code(number)}
+                response = await self.http.get("shipment/refreshCod", params=params)
+                if response.status_code == 401:
+                    self.logged_in = False
+                    await self._login()
+                    response = await self.http.get("shipment/refreshCod", params=params)
+                if response.status_code not in {200, 204} or "text/html" in response.headers.get("content-type", "").lower():
+                    raise SPSError("SPS nepotvrdilo kontrolu platby. Pôvodná suma dobierky zostáva platná; skúste obnoviť údaje.")
+            except httpx.HTTPError as exc:
+                raise SPSError("Kontrola platby v SPS zlyhala. Dobierka sa nemení na zaplatenú.") from exc
+
     async def expired_shipments(self):
         rows = await self._read("GET", "shipment/expired")
         # A shipment may contain a compact status object without the event
@@ -233,13 +256,15 @@ class SPSClient:
             rows = merged
         return _parcel_rows(rows, returns=True)
 
-    async def _write(self, method, path, body, *, courier=False, require_terminal=False):
+    async def _write(self, method, path, body, *, courier=False, require_terminal=False, dropoff=False):
         async with self.lock:
             # Login failure is known to happen before any mutation request.
             if not self.logged_in:
                 await self._login()
             if require_terminal and not self.payment_terminal:
                 raise SPSError("SPS nemá pre toto výdajné miesto povolený platobný terminál.")
+            if dropoff and not self.dropoff_allowed:
+                raise SPSError("SPS nemá pre toto výdajné miesto povolené prijímanie podaní od zákazníkov.")
             try:
                 r = await self.http.request(method, path, json=body)
             except httpx.HTTPError as exc:
@@ -249,13 +274,32 @@ class SPSClient:
                 # page returned with HTTP 200 is not a confirmed parcel write.
                 if r.status_code == 202 or "text/html" in r.headers.get("content-type", "").lower():
                     raise OperationUncertainError("SPS neposkytlo jednoznačné potvrdenie. Pred opakovaním overte stav v SPS.")
+                response = None
                 if r.content.strip():
                     try:
                         response = r.json()
                     except ValueError as exc:
                         raise OperationUncertainError("SPS vrátilo neočakávané potvrdenie. Pred opakovaním overte stav v SPS.") from exc
-                    if response is False or isinstance(response, dict) and (response.get("error") or response.get("success") is False):
+                    if not dropoff and (response is False or isinstance(response, dict) and (response.get("error") or response.get("success") is False)):
                         raise OperationUncertainError("SPS vrátilo nejednoznačný výsledok. Pred opakovaním overte stav v SPS.")
+                if dropoff:
+                    # This endpoint has its own explicit acceptance contract;
+                    # an empty 2xx is NOT a successful customer intake.
+                    if not isinstance(response, dict):
+                        raise OperationUncertainError("SPS nepotvrdilo prijatie podania. Pred opakovaním overte stav zásielky v SPS.")
+                    flags = [response.get("cargonetAccepted"), response.get("cdexAccepted")]
+                    error = response.get("error")
+                    if any(value is True for value in flags):
+                        if error or response.get("success") is False or any(value is not None and type(value) is not bool for value in flags):
+                            raise OperationUncertainError("SPS vrátilo rozporné potvrdenie podania. Overte ho v portáli SPS.")
+                        return
+                    if error == "DROPOFF_DISABLED":
+                        raise SPSError("SPS nepovoľuje prijatie podania na tomto výdajnom mieste.")
+                    if error == "INVALID_TRACKNUMBER_LENGTH":
+                        raise SPSError("SPS odmietlo dĺžku čísla zásielky. Naskenujte celé číslo zo štítka.")
+                    if not error and any(value is False for value in flags) and all(value is None or type(value) is bool for value in flags):
+                        raise SPSError("SPS toto číslo zásielky neprijalo. Skontrolujte zákaznícky štítok v portáli SPS.")
+                    raise OperationUncertainError("SPS nevrátilo jednoznačný výsledok podania. Pred opakovaním ho overte v SPS.")
                 return
             if r.status_code == 401:
                 self.logged_in = False
@@ -279,6 +323,9 @@ class SPSClient:
         await self._write("POST", "shipment/accept", {
             "trackNumber": number, "courierId": courier_id, "password": courier_password,
         }, courier=True)
+
+    async def dropoff(self, number):
+        await self._write("POST", "insertShipmentForDropoff", {"trackNumber": normalize_code(number)}, dropoff=True)
 
     async def deliver(self, pin, cod_confirmed=False, paid_with_terminal=False):
         if cod_confirmed and paid_with_terminal:
@@ -330,13 +377,14 @@ class DemoSPS:
         self.delivered = {}
         self.parcels = {
             "DEMOSTORED01": self._demo_parcel("DEMOSTORED01", cod=12.50),
+            "DEMOMOBILE01": self._demo_parcel("DEMOMOBILE01", cod=18.90),
             "DEMOEXPIRED01": self._demo_parcel("DEMOEXPIRED01", days=-1),
             "DEMOBLOCKED01": self._demo_parcel("DEMOBLOCKED01", days=-1, status=5555),
             "DEMOOUTGOING01": self._demo_parcel("DEMOOUTGOING01", outgoing=True),
             "DEMOOUTGOING02": self._demo_parcel("DEMOOUTGOING02", outgoing=True),
             "DEMOOUTBLOCKED03": self._demo_parcel("DEMOOUTBLOCKED03", outgoing=True, status=5555),
         }
-        self.pins = {"111111": "DEMOSTORED01", "222222": "DEMOEXPIRED01", "333333": "DEMOBLOCKED01"}
+        self.pins = {"111111": "DEMOSTORED01", "222222": "DEMOMOBILE01", "222223": "DEMOEXPIRED01", "333333": "DEMOBLOCKED01"}
 
     capabilities = SPSClient.capabilities.copy()
 
@@ -380,6 +428,21 @@ class DemoSPS:
     async def lookup_pickup(self, pin):
         number = self.pins.get(str(pin).strip())
         return {**self.parcels[number], "paymentTerminalAllowed": True} if number in self.parcels else None
+
+    async def refresh_cod(self, number):
+        if number not in self.parcels:
+            raise SPSError("Skúšobná zásielka už nie je uložená.")
+        # Only this explicitly named demo parcel simulates an external mobile
+        # payment on refresh. Production always obtains cod from SPS instead.
+        if number == "DEMOMOBILE01":
+            self.parcels[number]["cod"] = 0
+
+    async def dropoff(self, number):
+        if number in self.parcels or number in self.completed:
+            raise SPSError("Skúšobná zásielka už bola prijatá.")
+        if not number.startswith("DEMODROPOFF") or not number[len("DEMODROPOFF"):].isdigit():
+            raise SPSError("V demo režime použite nové zákaznícke podanie DEMODROPOFF01.")
+        self.parcels[number] = self._demo_parcel(number, outgoing=True)
 
     async def expired_shipments(self):
         """The official endpoint is named expired, but is the whole handover queue."""

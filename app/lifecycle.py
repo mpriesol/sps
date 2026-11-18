@@ -1,7 +1,7 @@
 """Verified carrier lifecycle actions, kept separate from physical shelving.
 
 PIN lookup never releases a parcel. A short-lived lookup is tied to the current
-session, then rechecked against SPS and a full tracking scan before delivery.
+session and rechecked against SPS; physical scan verification is configurable.
 """
 import asyncio
 import hashlib
@@ -31,10 +31,22 @@ class Lookup(Body):
 
 class ConfirmPickup(Body):
     lookup_id: str = Field(min_length=1, max_length=100)
-    scanned_number: str = Field(min_length=1, max_length=100)
+    scanned_number: str | None = Field(default=None, min_length=1, max_length=100)
     cod_confirmed: bool = False
     paid_with_terminal: bool = False
     operation_id: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_:-]+$")
+
+
+class RefreshPickup(Body):
+    lookup_id: str = Field(min_length=1, max_length=100)
+
+
+class ConfirmDropoff(Body):
+    # Intent guard for a new, uncatalogued full code. This is not a claim about
+    # SPS's tracking-number format: SPS validates the actual label itself.
+    number: str = Field(min_length=6, max_length=100)
+    operation_id: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_:-]+$")
+    scanned: bool = False
 
 
 class ReturnNumbers(Body):
@@ -54,7 +66,7 @@ class Receipt(Body):
 
 class ResolveOperation(Body):
     number: str = Field(min_length=1, max_length=100)
-    kind: Literal["accept", "deliver", "return"]
+    kind: Literal["accept", "dropoff", "deliver", "return"]
     outcome: Literal["confirmed", "failed"]
     note: str = Field(min_length=5, max_length=500)
     verified_in_sps: bool
@@ -77,7 +89,7 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         try:
             await write()
         except (OperationUncertainError, asyncio.CancelledError):
-            uncertain = {"accept": "accept_uncertain", "deliver": "delivery_uncertain", "return": "return_uncertain"}[kind]
+            uncertain = {"accept": "accept_uncertain", "dropoff": "dropoff_uncertain", "deliver": "delivery_uncertain", "return": "return_uncertain"}[kind]
             warehouse.finish_carrier_operation(operation_id, "uncertain", carrier_status=uncertain, actor=actor)
             raise
         except SPSError:
@@ -117,6 +129,35 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         warehouse.sync_carrier_parcels(rows)
         return {**warehouse.snapshot(), "synced_at": datetime.now(timezone.utc).isoformat()}
 
+    @app.post("/api/dropoff/confirm")
+    async def confirm_dropoff(request: Request, body: ConfirmDropoff):
+        require("dropoff")
+        session = session_for(request)
+        number = parcel_number(body.number)
+        if len(number) < 6:
+            raise HTTPException(422, "Zadajte celé číslo podania, nie iba jeho koncovku.")
+        local = warehouse.get_parcel(number)
+        if local and (local["pending_operation"] or local["carrier_status"] not in {"accepted", "unconfirmed"}):
+            raise HTTPException(409, "Balík už bol odovzdaný alebo čaká na overenie predchádzajúcej operácie v SPS.")
+        if local and local["dropoff_confirmed"]:
+            # Validate operation-id ownership even on a successful replay.
+            warehouse.begin_carrier_operation(number, "dropoff", body.operation_id)
+            return {"accepted": True, "number": number, "already_accepted": True,
+                    "local_saved": True, "replayed": True, "parcel": local}
+        if local and local["carrier_status"] == "accepted":
+            raise HTTPException(409, "Balík už je uložený v SPS. Nové zákaznícke podanie sa nesmie potvrdiť druhýkrát; overte ho v SPS.")
+        # Catch parcels already taken in through the official portal. Presence
+        # is evidence of stored stock, not proof of our own customer intake.
+        stored = await client.stored_shipments(number)
+        current = next((p for p in stored if normalize_code(p["trackNumber"]) == number), None)
+        if current is not None:
+            warehouse.sync_carrier_parcels([current])
+            raise HTTPException(409, "SPS už eviduje tento balík na výdajnom mieste. Skontrolujte ho v SPS; príjem neopakujte.")
+        warehouse.register_parcel(number, actor=session["actor"], scanned=body.scanned)
+        result = await perform(number, "dropoff", body.operation_id, session["actor"],
+                               lambda: client.dropoff(number), "accepted", {"intake_kind": "dropoff"})
+        return {**result, "accepted": True, "number": number, "parcel": warehouse.get_parcel(number)}
+
     @app.post("/api/pickup/lookup")
     async def lookup(request: Request, body: Lookup):
         require("pickup_lookup")
@@ -137,13 +178,46 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         current = next((p for p in stored if normalize_code(p["trackNumber"]) == number), None)
         if current is None:
             raise HTTPException(409, "Balík nie je v SPS vedený medzi uloženými zásielkami tohto miesta. Overte ho v portáli SPS.")
-        warehouse.sync_carrier_parcels([current])
+        warehouse.sync_carrier_parcels([{**current, "cod": parcel["cod"]}])
         local = warehouse.get_parcel(number)
-        if local["carrier_status"] != "accepted":
+        if local["carrier_status"] != "accepted" or local["pending_operation"]:
             raise HTTPException(409, "Balík už bol vydaný alebo čaká na overenie predchádzajúcej operácie v SPS.")
         lookup_id = secrets.token_urlsafe(24)
         lookups[lookup_id] = {"pin": pin, "number": number, "cod": parcel["cod"], "expires": now + 600}
-        return {"parcel": parcel, "local": local, "lookup_id": lookup_id}
+        return {"parcel": parcel, "local": local, "lookup_id": lookup_id,
+                "scan_required": warehouse.get_settings()["pickup_scan_required"]}
+
+    @app.post("/api/pickup/refresh")
+    async def refresh_pickup(request: Request, body: RefreshPickup):
+        require("pickup_refresh")
+        session = session_for(request)
+        item = session["pickups"].get(body.lookup_id)
+        if item is None or item["expires"] < time.time():
+            raise HTTPException(409, "Vyhľadanie vypršalo. Zadajte PIN zákazníka znova.")
+        previous = dict(item)
+        number = previous["number"]
+        local = warehouse.get_parcel(number)
+        if local is None or local["carrier_status"] != "accepted" or local["pending_operation"]:
+            raise HTTPException(409, "Stav balíka vyžaduje overenie. Najskôr skontrolujte výsledok v SPS.")
+        await client.refresh_cod(number)
+        parcel = await client.lookup_pickup(previous["pin"])
+        if parcel is None or normalize_code(parcel["trackNumber"]) != number:
+            raise HTTPException(409, "PIN už nepatrí k vybranému balíku. Vyhľadajte ho znova.")
+        stored = await client.stored_shipments(number)
+        current = next((p for p in stored if normalize_code(p["trackNumber"]) == number), None)
+        if current is None:
+            raise HTTPException(409, "Balík už nie je v SPS vedený medzi uloženými zásielkami. Overte ho v portáli SPS.")
+        warehouse.sync_carrier_parcels([{**current, "cod": parcel["cod"]}])
+        local = warehouse.get_parcel(number)
+        if local["carrier_status"] != "accepted" or local["pending_operation"]:
+            raise HTTPException(409, "Medzičasom sa zmenil stav balíka. Najskôr overte výsledok v SPS.")
+        # Replace the baseline only after a complete, successful authoritative
+        # refresh. A timeout or malformed amount must never turn COD into zero.
+        session["pickups"][body.lookup_id] = {**previous, "cod": parcel["cod"], "expires": time.time() + 600}
+        return {"lookup_id": body.lookup_id, "parcel": parcel, "local": local,
+                "amount_changed": previous["cod"] != parcel["cod"],
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "scan_required": warehouse.get_settings()["pickup_scan_required"]}
 
     @app.post("/api/pickup/confirm")
     async def confirm_pickup(request: Request, body: ConfirmPickup):
@@ -152,8 +226,11 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         item = session["pickups"].get(body.lookup_id)
         if item is None or item["expires"] < time.time():
             raise HTTPException(409, "Vyhľadanie vypršalo. Zadajte PIN zákazníka znova.")
+        item = dict(item)
         number = item["number"]
-        if normalize_code(body.scanned_number) != number:
+        if warehouse.get_settings()["pickup_scan_required"] and body.scanned_number is None:
+            raise HTTPException(409, "Pred výdajom naskenujte celý kód balíka podľa nastavenia prevádzky.")
+        if body.scanned_number is not None and normalize_code(body.scanned_number) != number:
             raise HTTPException(409, "Naskenovaný balík nepatrí k tomuto PIN-u. Skontrolujte celé číslo zásielky.")
         local = warehouse.get_parcel(number)
         if local and local["carrier_status"] == "delivered":
@@ -163,18 +240,20 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
             elif item["cod"] > 0:
                 result["receipt_pending"] = True
             return result
-        if local is None or local["carrier_status"] != "accepted":
+        if local is None or local["carrier_status"] != "accepted" or local["pending_operation"]:
             raise HTTPException(409, "Stav balíka vyžaduje overenie. Výdaj nemožno zopakovať bez kontroly SPS.")
         # Never trust a stale lookup: a PIN or amount may have changed in SPS.
         fresh = await client.lookup_pickup(item["pin"])
         if fresh is None or normalize_code(fresh["trackNumber"]) != number:
             raise HTTPException(409, "PIN už nepatrí k vybranému balíku. Vyhľadajte ho znova.")
         if fresh["cod"] != item["cod"]:
-            raise HTTPException(409, "Suma dobierky sa zmenila. Vyhľadajte PIN znova a skontrolujte platbu.")
+            raise HTTPException(409, "Suma dobierky sa zmenila. Obnovte platbu alebo vyhľadajte PIN znova a skontrolujte dobierku.")
         if body.cod_confirmed and body.paid_with_terminal:
             raise HTTPException(422, "Vyberte jeden spôsob úhrady dobierky.")
         if fresh["cod"] > 0 and not (body.cod_confirmed or body.paid_with_terminal):
             raise HTTPException(422, "Pred výdajom potvrďte skutočné prijatie dobierky.")
+        if fresh["cod"] == 0 and (body.cod_confirmed or body.paid_with_terminal):
+            raise HTTPException(422, "SPS už neeviduje dobierku na úhradu. Výdaj potvrďte bez hotovosti alebo terminálovej platby.")
         if body.paid_with_terminal and not fresh.get("paymentTerminalAllowed", False):
             raise HTTPException(422, "Tento SPS účet nemá povolený platobný terminál.")
         result = await perform(number, "deliver", body.operation_id, session["actor"],
@@ -214,7 +293,13 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         # screen uses it for customer drop-offs as well as expired/other returns.
         rows = await client.expired_shipments()
         warehouse.sync_carrier_parcels(rows)
-        result = [{**row, "local": warehouse.get_parcel(row["trackNumber"])} for row in rows]
+        result = []
+        for row in rows:
+            local = warehouse.get_parcel(row["trackNumber"])
+            kind = row.get("handoverKind", "unknown")
+            if kind not in {"outgoing", "return"} and local["dropoff_confirmed"]:
+                kind = "outgoing"
+            result.append({**row, "handoverKind": kind, "local": local})
         return {"parcels": result, "synced_at": datetime.now(timezone.utc).isoformat(),
                 "outgoing": [p for p in result if p.get("handoverKind") == "outgoing"],
                 "returns": [p for p in result if p.get("handoverKind") == "return"],

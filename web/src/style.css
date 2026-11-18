@@ -25,3 +25,30 @@ div[data-view="pickup"] .camera-preview,section[data-view="pickup"] .camera-prev
 .saved-couriers-heading{font-size:13px;margin:19px 0 8px}.saved-couriers-list{display:grid;gap:6px;max-height:210px;overflow:auto}.saved-courier-button{min-height:40px;padding:8px 10px;text-align:left;background:#f1f5f2;border:1px solid #d4dfd7;font-size:13px;overflow-wrap:anywhere}.saved-courier-button.is-selected{background:#deeee3;border-color:#5c906d;color:#1d5835}.saved-secret-row{margin:10px 0}.saved-secret-row input{margin-top:9px;background:#f4f7f5;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}#forget-courier{margin-top:12px;color:#9a3e35}#manager-hint{margin:12px 0}#manager-message{min-height:0}#manager-message:empty{display:none}
 @media(min-width:650px){.workspace-nav{grid-template-columns:repeat(3,minmax(0,1fr))}.nav-button{font-size:12px}.camera-preview{height:185px}.receipt-catalog{padding:13px}.parcel-tile{font-size:14px}.receipt-courier-field{flex:1.2}.receipt-submit-row{flex:1}}
 @media(max-width:370px){.nav-button{font-size:10px;padding-left:3px;padding-right:3px}.parcel-tile{font-size:12px}.receipt-catalog{padding:9px}.receipt-selection-tools{gap:5px}.receipt-selection-tools button{padding:6px 7px}}
+
+/* The counter keeps its four main flows on one row at phone widths. */
+.workspace-nav{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
+.workspace-nav .nav-button{min-height:49px;padding:7px 3px;font-size:12px;line-height:1.2;overflow-wrap:normal}
+.nav-main,.nav-detail{display:block}
+.nav-main{font-size:12px;font-weight:750}
+.nav-detail{font-size:10px;font-weight:550;margin-top:3px;white-space:normal}
+.top-actions{gap:2px;min-width:0}.top-actions .text-button{padding:7px 5px;font-size:11px;white-space:nowrap}
+.more-tools-wrap{position:relative}.tools-menu{position:absolute;top:calc(100% + 5px);right:0;z-index:8;width:210px;max-width:calc(100vw - 24px);padding:5px;background:#fff;border:1px solid var(--border);border-radius:6px;box-shadow:0 8px 25px #10251d26}
+.tools-menu button{display:block;width:100%;min-height:44px;padding:10px 12px;background:#fff;color:var(--ink);font-size:13px;text-align:left;white-space:normal}
+.tools-menu button.active{background:#e5f0e8;color:#194d31;box-shadow:none}
+/* A status update must not move the parcel grid; longer messages remain scrollable. */
+#work-view[data-view="receipt"] #scan-feedback{height:50px;min-height:50px;max-height:50px;overflow-y:auto}
+.receipt-courier-field .receipt-active-hint:not([hidden]){display:flex;align-items:center;gap:8px;margin:0 0 7px;padding:6px 8px;max-height:76px;overflow-y:auto}
+.receipt-active-hint .mono{flex:1;min-width:0;font-size:11px;line-height:1.35}.receipt-active-hint button{flex:0 0 auto;min-width:0;min-height:32px;padding:5px 8px;font-size:11px}
+.pickup-card{padding:15px;margin:10px 0;border:1px solid var(--border);border-radius:7px;background:#fff}
+.pickup-card.has-cod{background:#fff2de;border-color:#e7bc76}
+.pickup-recipient{font-size:25px;font-weight:750;line-height:1.2;letter-spacing:-.4px;margin:0 0 13px;overflow-wrap:anywhere}
+.pickup-cod{display:block;font-size:25px;font-weight:800;line-height:1.25;color:#794009;margin:14px 0 10px}
+.pickup-time{margin:10px 0 8px}
+.pickup-card .pickup-confirm{margin:13px 0 0;padding:13px 0 0;background:transparent;border:0;border-top:1px solid #dce3df;border-radius:0}
+.pickup-card.has-cod .pickup-confirm{border-top-color:#e9c897}
+.pickup-card .check-row{display:flex;align-items:flex-start;gap:10px;margin:12px 0;font-size:13px;font-weight:600}
+.pickup-card .check-row input{width:20px;height:20px;min-height:20px;flex:0 0 20px;margin-top:1px;accent-color:var(--green)}
+.pickup-card .pickup-refresh{min-height:38px;font-size:12px;margin:5px 0}
+.pickup-card .parcel-card{margin:0;padding:0;background:transparent;border:0;border-radius:0}
+@media(max-width:350px){.brand{gap:6px}.brand strong{font-size:14px}.brand-icon{font-size:21px}.top-actions .text-button{padding-left:4px;padding-right:4px}.nav-detail{font-size:9px}.pickup-recipient{font-size:23px}}
