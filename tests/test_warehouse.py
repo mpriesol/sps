@@ -218,6 +218,23 @@ def test_staging_is_optional_and_does_not_fake_handover(store):
     assert returned["location_id"] is None and returned["staged"] is False
 
 
+def test_authoritative_handover_metadata_persists_without_releasing_parcel(store):
+    shelf = locations(store)[0]
+    placed(store, "OUTGOING001", shelf)
+    store.sync_carrier_parcels([{
+        "trackNumber": "OUTGOING001", "senderName": "Sender", "expiredDate": None,
+        "statusCode": 123, "statusDate": "2026-11-18T09:15:00+01:00",
+        "returnEligible": True, "handoverKind": "outgoing", "pin": "must-not-be-stored",
+    }])
+    parcel = Warehouse(store.path).get_parcel("OUTGOING001")
+    assert parcel["carrier_data"]["handoverKind"] == "outgoing"
+    assert parcel["carrier_data"]["statusDate"] == "2026-11-18T09:15:00+01:00"
+    assert "pin" not in parcel["carrier_data"]
+    assert parcel["carrier_status"] == "accepted"
+    assert parcel["expires_at"] is None
+    assert parcel["location_id"] == shelf["id"]
+
+
 def jpeg_data_url():
     image = Image.new("RGB", (2000, 1000), "red")
     stream = io.BytesIO()
@@ -303,6 +320,18 @@ def test_account_databases_and_preferences_do_not_leak(tmp_path):
     assert second.get_parcel("001") is None
     assert second.get_settings()["last_courier_id"] is None
     assert Warehouse(first.path).get_settings()["last_courier_id"] == "7"
+
+
+def test_receipt_placement_defaults_for_existing_settings_and_survives_restart(store, tmp_path):
+    store.update_settings({"courier_warning": False})
+    assert Warehouse(store.path).get_settings()["receipt_place"] is False
+    store.update_settings({"receipt_place": True})
+    reopened = Warehouse(store.path)
+    assert reopened.snapshot()["settings"]["receipt_place"] is True
+    assert reopened.get_settings()["courier_warning"] is False
+    assert Warehouse(tmp_path / "other-account.sqlite3").get_settings()["receipt_place"] is False
+    with pytest.raises(WarehouseError, match="zapnuté alebo vypnuté"):
+        reopened.update_settings({"receipt_place": "not-a-boolean"})
 
 
 def test_public_route_cannot_set_courier_preference_or_fake_accepted_status(store):

@@ -128,6 +128,8 @@ async def test_stored_and_expired_contract_preserves_carrier_dates_and_return_ga
         if request.url.path.endswith('/getStoredShipments'):
             assert request.url.params['trackNumber'] == '0012345'
             return httpx.Response(200, json=[{'trackNumber': '0012345', 'expiredDate': '2026-12-01T23:59:59', 'status': {'code': 441, 'description': 'Stored'}}])
+        if request.url.path.endswith('/events'):
+            return httpx.Response(403)
         assert request.url.path.endswith('/shipment/expired')
         return httpx.Response(200, json=[
             {'trackNumber': '0012345', 'status': {'code': 441}, 'entryCourier': 7},
@@ -141,6 +143,7 @@ async def test_stored_and_expired_contract_preserves_carrier_dates_and_return_ga
     assert returns[0]['returnEligible'] is True
     assert returns[0]['entryCourier'] == 7
     assert returns[1]['returnEligible'] is False
+    assert returns[0]['handoverKind'] == 'unknown'
     await sps.close()
 
 
@@ -246,11 +249,14 @@ async def test_demo_entire_lifecycle_and_cod_gate_are_local():
     await sps.deliver('111111', cod_confirmed=True)
     assert (await sps.receipt('DEMOSTORED01')).startswith(b'%PDF-1.4')
     expired = await sps.expired_shipments()
-    assert {p['trackNumber']: p['returnEligible'] for p in expired} == {'DEMOEXPIRED01': True, 'DEMOBLOCKED01': False}
+    assert {p['trackNumber']: p['returnEligible'] for p in expired} == {
+        'DEMOEXPIRED01': True, 'DEMOBLOCKED01': False,
+        'DEMOOUTGOING01': True, 'DEMOOUTGOING02': True, 'DEMOOUTBLOCKED03': False,
+    }
     with pytest.raises(SPSError):
         await sps.return_parcel('DEMOBLOCKED01', 1, 'demo')
     await sps.return_parcel('DEMOEXPIRED01', 1, 'demo')
-    assert {p['trackNumber'] for p in await sps.expired_shipments()} == {'DEMOBLOCKED01'}
+    assert {p['trackNumber'] for p in await sps.expired_shipments()} == {'DEMOBLOCKED01', 'DEMOOUTGOING01', 'DEMOOUTGOING02', 'DEMOOUTBLOCKED03'}
     await sps.close()
 
 
@@ -316,4 +322,94 @@ async def test_receipt_numbering_timeout_is_not_retried_or_reported_as_delivery_
     with pytest.raises(OperationUncertainError, match='Výdaj je dokončený'):
         await sps.receipt('0012345')
     assert downloads == 1
+    await sps.close()
+
+
+@pytest.mark.asyncio
+async def test_courier_queue_classifies_only_authoritative_flags_and_uses_one_handover_endpoint():
+    writes = []
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': 12})
+        if request.url.path.endswith('/shipment/expired'):
+            return httpx.Response(200, json=[
+                {'trackNumber': 'OUT01', 'expiredDate': None, 'statusDate': '2026-11-18T10:00:00', 'status': {'code': 71, 'droppoff': True, 'shouldReturnToCourier': True}},
+                {'trackNumber': 'EXP02', 'status': {'code': 441, 'droppoff': False, 'shouldReturnToCourier': True}},
+                {'trackNumber': 'UNKNOWN03', 'expiredDate': '2000-01-01', 'status': {'code': 999, 'droppoff': False, 'shouldReturnToCourier': False}},
+                {'trackNumber': 'OUTBLOCK04', 'status': {'code': 5555, 'droppoff': True, 'shouldReturnToCourier': True}},
+            ])
+        assert request.method == 'PUT' and request.url.path.endswith('/shipment/return')
+        writes.append(json.loads(request.content))
+        return httpx.Response(204)
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    queue = await sps.expired_shipments()
+    assert [p['handoverKind'] for p in queue] == ['outgoing', 'return', 'unknown', 'outgoing']
+    assert queue[0]['statusDate'] == '2026-11-18T10:00:00'
+    assert queue[0]['expiredDate'] is None
+    assert queue[3]['returnEligible'] is False
+    await sps.return_parcel('OUT01', 7, 'secret')
+    assert writes == [{'trackNumber': 'OUT01', 'courierId': 7, 'password': 'secret'}]
+    await sps.close()
+
+
+@pytest.mark.asyncio
+async def test_status_catalog_fills_partial_metadata_without_overwriting_explicit_flags():
+    catalog_reads = 0
+    def handler(request):
+        nonlocal catalog_reads
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': 12})
+        if request.url.path.endswith('/events'):
+            catalog_reads += 1
+            return httpx.Response(200, json=[
+                {'code': 71, 'droppoff': True, 'shouldReturnToCourier': True},
+                {'code': 441, 'droppoff': False, 'shouldReturnToCourier': True},
+                {'code': 91, 'droppoff': True, 'shouldReturnToCourier': True},
+                {'code': 91, 'droppoff': False, 'shouldReturnToCourier': False},
+            ])
+        assert request.url.path.endswith('/shipment/expired')
+        return httpx.Response(200, json=[
+            {'trackNumber': 'OUT01', 'status': {'code': 71, 'droppoff': None}},
+            {'trackNumber': 'RET02', 'status': {'code': 441, 'droppoff': False}},
+            {'trackNumber': 'LATEST03', 'status': {'code': 71, 'droppoff': False, 'shouldReturnToCourier': False}},
+            {'trackNumber': 'CONFLICT04', 'status': {'code': 91}},
+        ])
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    for _ in range(2):
+        queue = await sps.expired_shipments()
+        assert [p['handoverKind'] for p in queue] == ['outgoing', 'return', 'unknown', 'unknown']
+        assert all(p['returnEligible'] for p in queue)
+    assert catalog_reads == 1
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('catalog_status', [403, 500])
+async def test_unavailable_status_catalog_never_blocks_handover_or_invents_type(catalog_status):
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': 12})
+        if request.url.path.endswith('/events'):
+            return httpx.Response(catalog_status)
+        return httpx.Response(200, json=[{'trackNumber': 'UNKNOWN1', 'expiredDate': '2000-01-01', 'status': {'code': 71}}])
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    queue = await sps.expired_shipments()
+    assert queue[0]['returnEligible'] is True and queue[0]['handoverKind'] == 'unknown'
+    await sps.close()
+
+
+@pytest.mark.asyncio
+async def test_demo_outgoing_does_not_need_customer_registration_to_be_handed_over():
+    sps = DemoSPS()
+    queue = await sps.expired_shipments()
+    outgoing = {p['trackNumber']: p for p in queue if p['handoverKind'] == 'outgoing'}
+    assert outgoing['DEMOOUTGOING01']['expiredDate'] is None
+    assert outgoing['DEMOOUTGOING02']['returnEligible'] is True
+    assert outgoing['DEMOOUTBLOCKED03']['returnEligible'] is False
+    await sps.return_parcel('DEMOOUTGOING01', 1, 'demo')
+    assert await sps.stored_shipments('DEMOOUTGOING01') == []
+    with pytest.raises(SPSError):
+        await sps.return_parcel('DEMOOUTBLOCKED03', 1, 'demo')
+    with pytest.raises(SPSError):
+        await sps.return_parcel('CUSTOMER_NOT_REGISTERED', 1, 'demo')
     await sps.close()

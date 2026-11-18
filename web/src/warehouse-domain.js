@@ -21,8 +21,8 @@ export function routeWarehouseScan(value, locations, activeNumber) {
 
 export function draftKey(account) { return `sps:receipt:v2:${account || 'default'}`; }
 
-export function serializeDraft(selected, courierId, placeDuringReceipt) {
-  return JSON.stringify({ version: 2, savedAt: Date.now(), courierId: String(courierId || ''), placeDuringReceipt: !!placeDuringReceipt,
+export function serializeDraft(selected, courierId) {
+  return JSON.stringify({ version: 2, savedAt: Date.now(), courierId: String(courierId || ''),
     parcels: [...selected.values()].map(item => ({ trackNumber: normalizeCode(item.trackNumber), senderName: String(item.senderName || '').slice(0, 200),
       state: item.state === 'sending' ? 'uncertain' : item.state, message: String(item.message || '').slice(0, 300), operationId: item.operationId || null })) });
 }
@@ -37,12 +37,64 @@ export function restoreDraft(raw) {
       message: p.state === 'uncertain' ? 'Príjem bol prerušený. Najprv over stav v SPS.' : String(p.message || '').slice(0, 300),
       operationId: typeof p.operationId === 'string' ? p.operationId : null,
     }));
-    return { parcels, courierId: String(data.courierId || ''), placeDuringReceipt: !!data.placeDuringReceipt };
+    // Receipt placement is a shared setting. Old drafts must not override it.
+    return { parcels, courierId: String(data.courierId || '') };
   } catch { return null; }
 }
 
 export function suffixCollisions(parcels, number) {
   return parcels.filter(p => !isTerminal(p) && p.number !== number && suffix(p.number) === suffix(number));
+}
+
+export function handoverEligible(remote, local = remote?.local) {
+  return remote?.returnEligible === true && remote?.statusCode !== 5555 && !isTerminal(local)
+    && !local?.pending_operation && (!local || local.carrier_status === 'accepted');
+}
+
+export function handoverGroups(parcels) {
+  const groups = { outgoing: [], returns: [], unknown: [] };
+  for (const parcel of parcels) groups[parcel.handoverKind === 'outgoing' ? 'outgoing' : parcel.handoverKind === 'return' ? 'returns' : 'unknown'].push(parcel);
+  return groups;
+}
+
+export function warehouseVoiceContext(workspace) {
+  const { view, state, inventory, pickup } = workspace;
+  const selected = new Map();
+  const candidates = new Map();
+  const add = parcel => {
+    const code = normalizeCode(parcel?.trackNumber || parcel?.number || '');
+    if (code) candidates.set(code, { ...parcel, trackNumber: code });
+  };
+  if (view === 'receipt') {
+    for (const parcel of state.shipments.values()) add(parcel);
+    for (const [code, parcel] of state.selected) { add(parcel); selected.set(code, parcel); }
+  } else {
+    // Include all reasonable physical parcels. The expected subset cannot make
+    // an otherwise ambiguous two-character suffix magically unique.
+    for (const parcel of workspace.parcels) if (!isTerminal(parcel)) add(parcel);
+    if (view === 'returns') {
+      for (const parcel of workspace.returns) add(parcel);
+      for (const code of workspace.returnScans) selected.set(code, candidates.get(code) || { trackNumber: code });
+    }
+    if (inventory) for (const code of inventory.numbers) { add({ trackNumber: code }); selected.set(code, candidates.get(code)); }
+    if (pickup) add(pickup.parcel);
+  }
+  const key = JSON.stringify([view, workspace.viewGeneration || 0, workspace.activeNumber, workspace.activeLocation,
+    workspace.receiptNumber, workspace.batchLocation, workspace.receiptPlacementEnabled(), pickup?.lookup_id,
+    pickup?.verified, pickup?.uncertain, inventory?.location_id, [...selected.keys()].sort(), [...candidates.keys()].sort(),
+    workspace.viewLoading, workspace.busy, workspace.photoBusy, workspace.photoGeneration || 0, workspace.returnBusy, state.preparing, state.receiving, state.finished,
+    view === 'returns' ? workspace.returnsGeneration || 0 : 0,
+    view === 'receipt' || view === 'store' ? workspace.locations.map(location => [location.barcode, location.name]) : []]);
+  const enabled = ['receipt', 'store', 'pickup', 'returns'].includes(view) && !workspace.viewLoading && !workspace.busy
+    && !workspace.photoBusy && !workspace.returnBusy && !state.preparing && !state.receiving
+    && !(view === 'receipt' && state.finished) && !(view === 'pickup' && (!pickup || pickup.uncertain));
+  return { key, candidates, selected, requireFullCode: view === 'pickup', enabled,
+    allowLocationNames: view === 'receipt' || view === 'store',
+    prompt: view === 'pickup' ? 'Povedz celý kód balíka, ktorý držíš v ruke.'
+      : inventory ? 'Povedz koncovku balíka do inventúry.'
+      : view === 'returns' ? 'Povedz koncovku balíka na odovzdanie kuriérovi.'
+      : view === 'store' ? 'Povedz koncovku balíka alebo „miesto“ a názov police.'
+      : 'Povedz koncovku balíka na príjem.' };
 }
 
 // Only an authenticated server snapshot may unblock a locally interrupted write.

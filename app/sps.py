@@ -1,4 +1,4 @@
-"""Adapter for endpoints observed in the official SPS portal (2026-11-17).
+"""Adapter for endpoints observed in the official SPS portal (2026-11-18).
 
 No write is retried automatically. Session cookies never leave this process.
 """
@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
+import time
 from typing import Any
 
 import httpx
@@ -73,6 +74,15 @@ def _parcel_rows(rows, *, returns=False, pickup=False):
             # The portal disables handover for status 5555. An administrator
             # must first resolve that shipment in SPS; never bypass this gate.
             parcel["returnEligible"] = status_code != 5555
+            # Despite its historic URL, /shipment/expired is the portal's whole
+            # "Výdaj kuriérovi" queue, including customer drop-offs. Event
+            # metadata calls that flag `droppoff` (two p's). Missing metadata
+            # remains unknown; dates and guessed status numbers cannot safely
+            # identify a customer drop-off.
+            dropoff = status.get("droppoff") if isinstance(status, dict) else None
+            should_return = status.get("shouldReturnToCourier") if isinstance(status, dict) else None
+            parcel["handoverKind"] = "outgoing" if dropoff is True else "return" if should_return is True else "unknown"
+            parcel["statusDate"] = row.get("statusDate") if isinstance(row.get("statusDate"), str) else None
             courier = row.get("entryCourier")
             parcel["entryCourier"] = courier if isinstance(courier, (str, int)) and not isinstance(courier, bool) else None
         result.append(parcel)
@@ -99,6 +109,8 @@ class SPSClient:
         )
         self.logged_in = False
         self.payment_terminal = False
+        self._handover_statuses = {}
+        self._handover_statuses_checked = None
         self.lock = asyncio.Lock()
 
     async def close(self):
@@ -178,7 +190,48 @@ class SPSClient:
         return parcel
 
     async def expired_shipments(self):
-        return _parcel_rows(await self._read("GET", "shipment/expired"), returns=True)
+        rows = await self._read("GET", "shipment/expired")
+        # A shipment may contain a compact status object without the event
+        # flags. The same code has authoritative metadata in the portal's event
+        # catalog. Some shop accounts cannot read it: that affects grouping
+        # only, never the authoritative queue or permission to hand over.
+        missing = any(isinstance(row.get("status"), dict)
+                      and not all(type(row["status"].get(key)) is bool for key in ("droppoff", "shouldReturnToCourier"))
+                      for row in rows)
+        if missing:
+            now = time.monotonic()
+            if self._handover_statuses_checked is None or now - self._handover_statuses_checked >= 300:
+                catalog = {}
+                conflicts = set()
+                try:
+                    for event in await self._read("GET", "events"):
+                        code = event.get("code")
+                        if isinstance(code, bool) or code is None or not str(code).isdigit():
+                            continue
+                        key = int(code)
+                        flags = {flag: event[flag] for flag in ("droppoff", "shouldReturnToCourier") if type(event.get(flag)) is bool}
+                        if key in catalog and catalog[key] != flags:
+                            conflicts.add(key)
+                        catalog[key] = flags
+                except SPSError:
+                    # No additional role or endpoint is tried on denied access.
+                    catalog = {}
+                self._handover_statuses = {code: flags for code, flags in catalog.items() if code not in conflicts}
+                self._handover_statuses_checked = now
+            merged = []
+            for row in rows:
+                status = row.get("status")
+                if isinstance(status, dict):
+                    code = status.get("code")
+                    key = int(code) if not isinstance(code, bool) and code is not None and str(code).isdigit() else None
+                    flags = self._handover_statuses.get(key, {})
+                    # Per-row metadata is freshest; never overwrite an explicit
+                    # false value with a cached true value.
+                    status = {**status, **{flag: value for flag, value in flags.items() if type(status.get(flag)) is not bool}}
+                    row = {**row, "status": status}
+                merged.append(row)
+            rows = merged
+        return _parcel_rows(rows, returns=True)
 
     async def _write(self, method, path, body, *, courier=False, require_terminal=False):
         async with self.lock:
@@ -279,17 +332,21 @@ class DemoSPS:
             "DEMOSTORED01": self._demo_parcel("DEMOSTORED01", cod=12.50),
             "DEMOEXPIRED01": self._demo_parcel("DEMOEXPIRED01", days=-1),
             "DEMOBLOCKED01": self._demo_parcel("DEMOBLOCKED01", days=-1, status=5555),
+            "DEMOOUTGOING01": self._demo_parcel("DEMOOUTGOING01", outgoing=True),
+            "DEMOOUTGOING02": self._demo_parcel("DEMOOUTGOING02", outgoing=True),
+            "DEMOOUTBLOCKED03": self._demo_parcel("DEMOOUTBLOCKED03", outgoing=True, status=5555),
         }
         self.pins = {"111111": "DEMOSTORED01", "222222": "DEMOEXPIRED01", "333333": "DEMOBLOCKED01"}
 
     capabilities = SPSClient.capabilities.copy()
 
     @staticmethod
-    def _demo_parcel(number, *, cod=0, days=7, status=441):
+    def _demo_parcel(number, *, cod=0, days=7, status=441, outgoing=False):
         return {"trackNumber": number, "senderName": "Skúšobný odosielateľ", "recipientName": "Demo zákazník",
-                "expiredDate": (datetime.now(timezone.utc) + timedelta(days=days)).isoformat(),
+                "expiredDate": None if outgoing else (datetime.now(timezone.utc) + timedelta(days=days)).isoformat(),
                 "statusCode": status, "statusLabel": "Vyžaduje vyriešenie v SPS" if status == 5555 else "Uložená na výdajnom mieste",
-                "cod": cod, "psRemark": "", "entryCourier": 1, "returnEligible": status != 5555}
+                "cod": cod, "psRemark": "", "entryCourier": 1, "returnEligible": status != 5555,
+                "handoverKind": "outgoing" if outgoing else "return", "statusDate": datetime.now(timezone.utc).isoformat()}
 
     async def close(self):
         pass
@@ -325,8 +382,9 @@ class DemoSPS:
         return {**self.parcels[number], "paymentTerminalAllowed": True} if number in self.parcels else None
 
     async def expired_shipments(self):
+        """The official endpoint is named expired, but is the whole handover queue."""
         now = datetime.now(timezone.utc)
-        return [dict(p) for p in self.parcels.values() if datetime.fromisoformat(p["expiredDate"]) < now]
+        return [dict(p) for p in self.parcels.values() if p.get("handoverKind") == "outgoing" or p.get("expiredDate") and datetime.fromisoformat(p["expiredDate"]) < now]
 
     async def deliver(self, pin, cod_confirmed=False, paid_with_terminal=False):
         parcel = await self.lookup_pickup(pin)

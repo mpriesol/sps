@@ -72,6 +72,7 @@ class SettingsBody(Body):
     courier_warning: bool | None = None
     photos: bool | None = None
     return_staging: bool | None = None
+    receipt_place: bool | None = None
 
 
 class Photo(Body):

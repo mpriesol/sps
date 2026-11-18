@@ -42,6 +42,31 @@ export function matchSpokenSuffix(transcript, shipments, selected) {
   return { kind: 'match', suffix, code: matches[0] };
 }
 
+export function matchSpokenFullCode(transcript, shipments, selected = new Map()) {
+  const literal = typeof transcript === 'string' ? normalizeCode(transcript) : '';
+  const codes = new Set([...shipments.keys(), ...selected.keys()].map(normalizeCode));
+  if (codes.has(literal)) return { kind: 'match', code: literal, suffix: literal };
+  const code = spokenSuffix(transcript);
+  if (!code) return { kind: 'invalid', suffix: null };
+  if (codes.has(code)) return { kind: 'match', code, suffix: code };
+  // Full verification must not expand even a unique suffix to the expected ID.
+  if ([...codes].some(number => number.endsWith(code))) return { kind: 'incomplete', suffix: code };
+  return { kind: 'unknown', suffix: code };
+}
+
+const normalizedLocation = value => String(value).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+
+export function matchSpokenLocation(transcript, locations) {
+  if (typeof transcript !== 'string') return null;
+  const phrase = normalizedLocation(transcript).match(/^(?:miesto|polica|regal)\s+(.+)$/);
+  if (!phrase) return null;
+  const name = phrase[1], spelled = spokenSuffix(name);
+  const matches = locations.filter(location => normalizedLocation(location.name) === name || (spelled && normalizeCode(location.name) === spelled));
+  if (!matches.length) return { kind: 'unknown', suffix: name, location: true };
+  if (matches.length > 1) return { kind: 'ambiguous', suffix: name, count: matches.length, location: true };
+  return { kind: 'match', code: matches[0].barcode, suffix: matches[0].name, location: true };
+}
+
 const errors = {
   'not-allowed': 'Povoľ mikrofón a hlasové rozpoznávanie v nastavení prehliadača.',
   'service-not-allowed': 'Prehliadač nepovolil hlasové rozpoznávanie. Skontroluj jeho nastavenia alebo použi kameru.',
@@ -52,11 +77,12 @@ const errors = {
 
 export class VoiceInput {
   constructor({ Recognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition,
-    onTranscript, onState, onError }) {
+    onTranscript, onState, onError, getContextKey = () => null }) {
     this.Recognition = Recognition;
     this.onTranscript = onTranscript;
     this.onState = onState;
     this.onError = onError;
+    this.getContextKey = getContextKey;
     this.active = false;
     this.recognition = null;
     this.timer = null;
@@ -83,18 +109,21 @@ export class VoiceInput {
       recognition.continuous = true;
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
+      const contextKey = this.getContextKey();
       let consumed = 0;
       recognition.onresult = event => {
         if (!this.active || this.recognition !== recognition) return;
+        if (this.getContextKey() !== contextKey) { this.pause(); this.resume(); return; }
         for (let i = Math.max(event.resultIndex, consumed); i < event.results.length; i++) {
           if (!this.active || this.recognition !== recognition) break;
           if (!event.results[i].isFinal) continue;
           consumed = i + 1;
-          this.onTranscript(event.results[i][0].transcript);
+          if (this.getContextKey() !== contextKey) { this.pause(); this.resume(); break; }
+          this.onTranscript(event.results[i][0].transcript, contextKey);
         }
       };
       recognition.onnomatch = () => {
-        if (this.active && this.recognition === recognition) this.onTranscript('');
+        if (this.active && this.recognition === recognition && this.getContextKey() === contextKey) this.onTranscript('', contextKey);
       };
       recognition.onerror = event => {
         if (!this.active || this.recognition !== recognition || event.error === 'no-speech') return;

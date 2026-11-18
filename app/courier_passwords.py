@@ -1,4 +1,4 @@
-"""Small server-only password store; metadata is safe to return to the UI."""
+"""Server-side password store; lists expose metadata, explicit reveal one secret."""
 import json
 import os
 import tempfile

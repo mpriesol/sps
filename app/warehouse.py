@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 DEFAULT_SETTINGS = {
     "courier_warning": True, "photos": False, "return_staging": False,
-    "last_courier_id": None,
+    "receipt_place": False, "last_courier_id": None,
 }
 TERMINAL = {"delivered", "returned"}
 CARRIER_STATES = {"unconfirmed", "accepted", "accept_uncertain", "delivery_uncertain", "return_uncertain", *TERMINAL}
@@ -432,7 +432,7 @@ class Warehouse:
                 expiry = item.get("expiredDate", item.get("expires_at"))
                 if expiry is not None:
                     expiry = str(expiry)[:100]
-                data = {key: item[key] for key in ("recipientName", "statusCode", "statusLabel", "cod", "psRemark", "returnEligible", "entryCourier") if key in item}
+                data = {key: item[key] for key in ("recipientName", "statusCode", "statusLabel", "statusDate", "cod", "psRemark", "returnEligible", "entryCourier", "handoverKind") if key in item}
                 if row is None:
                     db.execute("INSERT INTO parcels(number,sender_name,carrier_status,expires_at,expiry_source,expiry_synced_at,created_at,updated_at,carrier_data) VALUES(?,?,?,?,?,?,?,?,?)", (number, sender, "accepted", expiry, source, timestamp, timestamp, timestamp, json.dumps(data, ensure_ascii=False)))
                     self._add_event(db, number, "carrier_sync", actor, None, None, 1, {"source": source})
