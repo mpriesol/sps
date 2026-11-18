@@ -132,7 +132,7 @@ class SPSClient:
             raise SPSError("SPS prihlásenie nie je dostupné alebo vrátilo neočakávanú odpoveď.") from exc
         self.logged_in = True
 
-    async def _read(self, method: str, path: str, body=None, *, params=None, single=False):
+    async def _read(self, method: str, path: str, body=None, *, params=None, single=False, allow_no_content=False):
         async with self.lock:
             try:
                 if not self.logged_in:
@@ -145,6 +145,12 @@ class SPSClient:
                     self.logged_in = False
                     await self._login()
                     r = await self.http.request(method, path, **kwargs)
+                if r.status_code == 204 and allow_no_content:
+                    # getShipmentDetails uses an empty 204 for an unknown
+                    # verification code. Other reads do not share that contract.
+                    if r.content.strip():
+                        raise SPSError("SPS vrátilo rozpornú odpoveď pri vyhľadaní zásielky. Skúste načítať údaje znova.")
+                    return None
                 if r.status_code != 200:
                     raise SPSError(f"Načítanie údajov zo SPS zlyhalo (HTTP {r.status_code}).")
                 data = r.json()
@@ -184,7 +190,7 @@ class SPSClient:
         pin = str(pin).strip()
         if not pin or len(pin) > 128:
             raise SPSError("Zadajte platný výdajný PIN.")
-        row = await self._read("GET", "getShipmentDetails", params={"smsKey": pin, "logInfo": "false"}, single=True)
+        row = await self._read("GET", "getShipmentDetails", params={"smsKey": pin, "logInfo": "false"}, single=True, allow_no_content=True)
         if row is None:
             return None
         parcel = _parcel_rows([row], pickup=True)[0]
