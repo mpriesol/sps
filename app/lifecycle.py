@@ -172,7 +172,7 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         pin = body.pin.get_secret_value().strip()
         parcel = await client.lookup_pickup(pin)
         if parcel is None:
-            raise HTTPException(404, "Pre tento PIN sa nenašiel balík. Skontrolujte kód zákazníka.")
+            raise HTTPException(404, "Pre tento verifikačný kód sa v SPS nenašiel balík. Skontrolujte kód zákazníka.")
         number = parcel_number(parcel["trackNumber"])
         stored = await client.stored_shipments(number)
         current = next((p for p in stored if normalize_code(p["trackNumber"]) == number), None)
@@ -201,8 +201,10 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
             raise HTTPException(409, "Stav balíka vyžaduje overenie. Najskôr skontrolujte výsledok v SPS.")
         await client.refresh_cod(number)
         parcel = await client.lookup_pickup(previous["pin"])
-        if parcel is None or normalize_code(parcel["trackNumber"]) != number:
-            raise HTTPException(409, "PIN už nepatrí k vybranému balíku. Vyhľadajte ho znova.")
+        if parcel is None:
+            raise HTTPException(409, "SPS už pre tento verifikačný kód nenašlo balík. Zadajte kód zákazníka znova.")
+        if normalize_code(parcel["trackNumber"]) != number:
+            raise HTTPException(409, "Verifikačný kód už nepatrí k vybranému balíku. Vyhľadajte ho znova.")
         stored = await client.stored_shipments(number)
         current = next((p for p in stored if normalize_code(p["trackNumber"]) == number), None)
         if current is None:
@@ -244,8 +246,10 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
             raise HTTPException(409, "Stav balíka vyžaduje overenie. Výdaj nemožno zopakovať bez kontroly SPS.")
         # Never trust a stale lookup: a PIN or amount may have changed in SPS.
         fresh = await client.lookup_pickup(item["pin"])
-        if fresh is None or normalize_code(fresh["trackNumber"]) != number:
-            raise HTTPException(409, "PIN už nepatrí k vybranému balíku. Vyhľadajte ho znova.")
+        if fresh is None:
+            raise HTTPException(409, "SPS už pre tento verifikačný kód nenašlo balík. Zadajte kód zákazníka znova.")
+        if normalize_code(fresh["trackNumber"]) != number:
+            raise HTTPException(409, "Verifikačný kód už nepatrí k vybranému balíku. Vyhľadajte ho znova.")
         if fresh["cod"] != item["cod"]:
             raise HTTPException(409, "Suma dobierky sa zmenila. Obnovte platbu alebo vyhľadajte PIN znova a skontrolujte dobierku.")
         if body.cod_confirmed and body.paid_with_terminal:

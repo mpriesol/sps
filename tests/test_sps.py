@@ -112,11 +112,41 @@ async def test_changed_pickup_contract_cannot_hide_unknown_cod(payload):
 
 
 @pytest.mark.asyncio
-async def test_missing_pickup_is_none_not_success():
+@pytest.mark.parametrize('status', [200, 204])
+async def test_missing_pickup_is_none_not_success(status):
     def handler(request):
-        return httpx.Response(200, content=b'{"parcelshop":12}' if request.url.path.endswith('/login') else b'null')
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': 12})
+        return httpx.Response(status, content=b'null' if status == 200 else b'')
     sps = SPSClient('test', 'test', httpx.MockTransport(handler))
     assert await sps.lookup_pickup('000001') is None
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,content', [(200, b''), (200, b'<html>Unavailable</html>'),
+                                          (204, b'{}'), (404, b''), (503, b'')])
+async def test_pickup_technical_or_malformed_response_is_not_an_unknown_code(status, content):
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': 12})
+        return httpx.Response(status, content=content)
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    with pytest.raises(SPSError):
+        await sps.lookup_pickup('000001')
+    await sps.close()
+
+
+@pytest.mark.asyncio
+async def test_no_content_not_found_contract_does_not_apply_to_inventory():
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': 12})
+        assert request.url.path.endswith('/getStoredShipments')
+        return httpx.Response(204)
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    with pytest.raises(SPSError):
+        await sps.stored_shipments()
     await sps.close()
 
 

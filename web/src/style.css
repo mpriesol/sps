@@ -36,8 +36,13 @@ div[data-view="pickup"] .camera-preview,section[data-view="pickup"] .camera-prev
 .more-tools-wrap{position:relative}.tools-menu{position:absolute;top:calc(100% + 5px);right:0;z-index:8;width:210px;max-width:calc(100vw - 24px);padding:5px;background:#fff;border:1px solid var(--border);border-radius:6px;box-shadow:0 8px 25px #10251d26}
 .tools-menu button{display:block;width:100%;min-height:44px;padding:10px 12px;background:#fff;color:var(--ink);font-size:13px;text-align:left;white-space:normal}
 .tools-menu button.active{background:#e5f0e8;color:#194d31;box-shadow:none}
-/* A status update must not move the parcel grid; longer messages remain scrollable. */
-#work-view[data-view="receipt"] #scan-feedback{height:50px;min-height:50px;max-height:50px;overflow-y:auto}
+/* Keep receipt updates in one stable row; long messages can scroll horizontally. */
+#scan-feedback{margin:0}
+#scan-feedback:empty{display:none}
+#work-view[data-view="receipt"] #scan-feedback,#work-view[data-view="returns"] #scan-feedback{height:34px;min-height:34px;max-height:34px;padding:8px 10px;line-height:18px;white-space:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+#scan-feedback::-webkit-scrollbar{display:none}
+.filter-toggle{display:inline-grid;place-items:center;min-width:32px;padding:6px!important;flex:0 0 auto}
+.filter-toggle[aria-expanded="true"]{color:#194d31;background:#e5f0e8;border-color:#538965}
 .receipt-courier-field .receipt-active-hint:not([hidden]){display:flex;align-items:center;gap:8px;margin:0 0 7px;padding:6px 8px;max-height:76px;overflow-y:auto}
 .receipt-active-hint .mono{flex:1;min-width:0;font-size:11px;line-height:1.35}.receipt-active-hint button{flex:0 0 auto;min-width:0;min-height:32px;padding:5px 8px;font-size:11px}
 .pickup-card{padding:15px;margin:10px 0;border:1px solid var(--border);border-radius:7px;background:#fff}

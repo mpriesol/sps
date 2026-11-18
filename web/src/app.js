@@ -45,6 +45,7 @@ async function api(path, data) {
 
 function feedback(message, type = '') {
   $('scan-feedback').textContent = message;
+  $('scan-feedback').title = message;
   $('scan-feedback').className = `feedback ${type}`;
 }
 
@@ -331,6 +332,18 @@ function scheduleCouriers() {
   }, 200);
 }
 
+function setReceiptFilter(open) {
+  const input = $('search'), toggle = $('toggle-filter');
+  input.hidden = !open;
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.title = open ? 'Zavrieť filter' : 'Zobraziť filter';
+  if (open) input.focus({ preventScroll: true });
+  else {
+    input.value = '';
+    renderCatalog();
+  }
+}
+
 function renderCatalog() {
   const list = $('receipt-list');
   const rows = receiptItems(state.shipments, state.selected, $('search').value);
@@ -375,7 +388,7 @@ async function loadShipments() {
   try {
     const result = await api('shipments');
     state.shipments = new Map(result.shipments.map(s => [normalizeCode(s.trackNumber), s]));
-    feedback(state.shipments.size ? `Pripravené. V SPS čaká ${parcelCount(state.shipments.size)}.` : 'V SPS momentálne nie sú zásielky na príjem.');
+    feedback(state.shipments.size ? `Pripravené. V SPS čaká ${parcelCount(state.shipments.size)}.` : 'V SPS nie sú zásielky na príjem.');
     // Preserve the user's selected list; stale entries can be removed explicitly.
   } catch (error) {
     $('load-error').textContent = error.message; $('load-error').hidden = false;
@@ -691,7 +704,12 @@ $('scan').addEventListener('click', startCamera);
 $('voice').addEventListener('click', toggleVoice);
 $('torch').addEventListener('click', async () => { try { torchOn = !torchOn; await scanner?.switchTorch?.(torchOn); $('torch').textContent = torchOn ? 'Vypnúť svetlo' : 'Prisvietiť'; } catch { feedback('Tento fotoaparát nepodporuje prisvietenie.', 'warning'); } });
 $('refresh').addEventListener('click', loadShipments);
+$('toggle-filter').addEventListener('click', () => setReceiptFilter($('search').hidden));
 $('search').addEventListener('input', renderCatalog);
+$('search').addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault(); setReceiptFilter(false); $('toggle-filter').focus({ preventScroll: true });
+});
 $('select-all').addEventListener('click', selectAllReceipt);
 $('clear-selection').addEventListener('click', clearReceipt);
 $('prepare').addEventListener('click', prepareReceipt);

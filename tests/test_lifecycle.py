@@ -10,11 +10,12 @@ import threading
 import uuid
 
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 
 from app.config import Settings
 from app.main import create_app
-from app.sps import DemoSPS, OperationUncertainError, SPSError
+from app.sps import DemoSPS, OperationUncertainError, SPSClient, SPSError
 
 
 PASSWORD = "lifecycle-test-application-password"
@@ -876,3 +877,59 @@ def test_received_and_scanned_dates_use_real_events_not_import_creation(workflow
     prepare_receipt(client, headers)
     assert accept(client, headers).status_code == 200
     assert warehouse.get_parcel("DEMO00000001")["received_at"]
+
+
+@pytest.mark.parametrize("action", ["lookup", "refresh", "confirm"])
+@pytest.mark.parametrize("failure", ["not_found", "timeout", "server", "malformed"])
+def test_missing_verification_code_is_distinct_from_read_failure_without_delivery(workflow, monkeypatch, action, failure):
+    client, demo, warehouse, headers = workflow
+    location = place(warehouse, "DEMOSTORED01")
+    found = lookup(client, headers) if action != "lookup" else None
+    original_lookup = demo.lookup_pickup
+
+    def handler(request):
+        if request.url.path.endswith("/login"):
+            return httpx.Response(200, json={"parcelshop": {"id": 12}})
+        assert request.method == "GET" and request.url.path.endswith("/getShipmentDetails")
+        if failure == "not_found":
+            return httpx.Response(204)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("test-only read timeout", request=request)
+        if failure == "server":
+            return httpx.Response(503)
+        return httpx.Response(200, content=b"not-json")
+
+    # Exercise the actual HTTP adapter through each API route, while all other
+    # carrier actions remain observable local fakes with no real network calls.
+    adapter = SPSClient("test", "test", httpx.MockTransport(handler))
+    monkeypatch.setattr(demo, "lookup_pickup", adapter.lookup_pickup)
+    try:
+        if action == "lookup":
+            response = client.post(PREFIX + "pickup/lookup", json={"pin": "999999"}, headers=headers)
+        elif action == "refresh":
+            response = client.post(PREFIX + "pickup/refresh", json={"lookup_id": found["lookup_id"]}, headers=headers)
+        else:
+            response = confirm(client, headers, found, cod_confirmed=True)
+    finally:
+        asyncio.run(adapter.close())
+        monkeypatch.setattr(demo, "lookup_pickup", original_lookup)
+
+    if failure == "not_found":
+        assert response.status_code == (404 if action == "lookup" else 409), response.text
+        assert "verifikačný kód" in response.json()["detail"]
+        assert "nenaš" in response.json()["detail"]
+    else:
+        assert response.status_code == 502, response.text
+        assert "nenaš" not in response.json()["detail"]
+    assert "lookup_id" not in response.json()
+    parcel = warehouse.get_parcel("DEMOSTORED01")
+    assert parcel["carrier_status"] == "accepted" and parcel["location_id"] == location["id"]
+    assert parcel["carrier_data"]["cod"] == 12.50 and parcel["pending_operation"] is None
+    assert demo.deliveries == [] and demo.receipts == []
+    if found:
+        # Failure must preserve the original lookup baseline, not reset or
+        # clear COD. A later fresh zero therefore still requires explicit refresh.
+        demo.parcels["DEMOSTORED01"]["cod"] = 0
+        changed = confirm(client, headers, found)
+        assert changed.status_code == 409 and "Suma dobierky sa zmenila" in changed.json()["detail"]
+        assert demo.deliveries == []
