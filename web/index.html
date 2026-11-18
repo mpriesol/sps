@@ -6,10 +6,10 @@
   <meta name="theme-color" content="#17252b">
   <meta name="description" content="Mobilný príjem balíkov SPS pre výdajné miesto.">
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
-  <title>Príjem balíkov · SPS</title>
+  <title>Balíky a police · SPS</title>
 </head>
 <body>
-  <header class="topbar"><div class="brand"><span class="brand-icon" aria-hidden="true">▣</span><strong>Príjem balíkov</strong></div><div class="top-actions"><button id="manage-couriers" class="text-button" hidden>Kuriéri</button><button id="logout" class="text-button" hidden>Odhlásiť</button></div></header>
+  <header class="topbar"><div class="brand"><span class="brand-icon" aria-hidden="true">▣</span><strong>Balíky a police</strong></div><div class="top-actions"><button id="manage-couriers" class="text-button" hidden>Kuriéri</button><button id="logout" class="text-button" hidden>Odhlásiť</button></div></header>
   <main>
     <section id="login-view" class="login-card card">
       <span class="eyebrow">VÝDAJNÉ MIESTO</span><h1>Balíky prijaté.<br>Za pár skenov.</h1><p class="muted">Prihlás sa a načítaj zásielky fotoaparátom mobilu.</p>
@@ -21,6 +21,9 @@
     <section id="work-view" hidden>
       <div id="demo-banner" class="demo-banner" hidden><strong>DEMO</strong> Skúšobné balíky. Nič sa neposiela do SPS.</div>
       <p id="load-error" class="error-box" role="alert" hidden></p>
+      <nav id="workspace-nav" class="workspace-nav" aria-label="Práca s balíkmi"></nav>
+      <div id="workspace-status" class="workspace-status"></div>
+      <div id="scanner-workspace">
       <section class="camera-card" aria-label="Čítačka čiarových kódov">
         <div id="camera-preview" class="camera-preview">
           <video id="video" muted playsinline></video>
@@ -34,11 +37,16 @@
       </section>
       <form id="manual-form" class="manual-form"><label class="sr-only" for="manual-code">Číslo zásielky</label><input id="manual-code" placeholder="Alebo zadaj číslo zásielky" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="100"><button class="secondary" id="manual-add" aria-label="Pridať zásielku">Pridať</button></form>
       <button id="demo-add" class="demo-add" hidden>+ Pridať skúšobný balík</button>
+      </div>
+      <section id="warehouse-panel" hidden></section>
+      <div id="receipt-area">
+      <div class="receipt-options card"><label class="check-label"><input id="receipt-place" type="checkbox"> Ukladať do políc počas príjmu</label><p class="muted">Po balíku naskenuj miesto. Alebo balíky ulož samostatne neskôr.</p><div id="receipt-active" hidden></div></div>
       <section class="card selected-card"><div class="section-title"><h2>Táto dávka <span id="selected-count" class="count-badge">0</span></h2><div class="list-actions"><span id="available-count" class="muted">— v SPS</span><button id="refresh" class="secondary compact">Obnoviť</button></div></div><div id="empty-selection" class="empty-selection"><span aria-hidden="true">↳</span> Naskenované balíky sa zobrazia tu.</div><ul id="selected-list" class="parcel-list"></ul></section>
       <section id="result" class="result card" hidden aria-live="polite"><span class="eyebrow">VÝSLEDOK PRÍJMU</span><h2 id="result-title"></h2><p id="result-text"></p></section>
       <details class="catalog card"><summary>Zoznam zásielok zo SPS <span id="catalog-count">0</span></summary><label class="sr-only" for="search">Hľadať zásielku</label><input id="search" placeholder="Hľadať číslo alebo odosielateľa" type="search"><ul id="catalog-list" class="parcel-list"></ul><p id="catalog-empty" class="muted" hidden>Nenašli sa žiadne zásielky.</p></details>
-      <p class="footnote">Balíky sa odošlú do SPS po stlačení Prijať. Ak má prvý kuriér v zozname uložené heslo, použije sa automaticky.</p>
-      <div class="bottom-bar"><div><strong id="bottom-count">0 balíkov</strong><span id="bottom-help">Pripravené na skenovanie</span></div><button id="prepare" class="primary" disabled>Prijať balíky</button><button id="new-receipt" class="primary" hidden>Nový príjem</button></div>
+      <p class="footnote">Príjem do SPS sa potvrdí až tlačidlom Prijať. Miesto balíka sa ukladá samostatne.</p>
+      <div class="bottom-bar"><div class="receipt-courier-field"><label for="receipt-courier">Kuriér pre tento príjem</label><select id="receipt-courier" disabled><option value="">Najprv naskenuj balík</option></select><span id="courier-warning" class="courier-warning" hidden></span></div><div class="receipt-submit-row"><div><strong id="bottom-count">0 balíkov</strong><span id="bottom-help">Pripravené na skenovanie</span></div><button id="prepare" class="primary" disabled>Prijať balíky</button><button id="new-receipt" class="primary" hidden>Nový príjem</button></div></div>
+      </div>
     </section>
   </main>
 

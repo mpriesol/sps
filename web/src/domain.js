@@ -17,7 +17,8 @@ export function classifyScan(value, shipments, selected) {
   return { kind: 'match', code, shipment };
 }
 
-export const remainingItems = selected => [...selected.values()].filter(item => item.state !== 'accepted');
+export const remainingItems = selected => [...selected.values()].filter(item => !['accepted', 'uncertain'].includes(item.state));
+export const receiptComplete = selected => selected.size > 0 && [...selected.values()].every(item => item.state === 'accepted');
 
 export function parcelCount(n) {
   return `${n} ${n === 1 ? 'balík' : n >= 2 && n <= 4 ? 'balíky' : 'balíkov'}`;
