@@ -50,7 +50,7 @@ Inventúra porovná obsah miesta s tým, čo naskenuješ. Ukáže nájdené, ch�
 
 ## 7. Fotografie, výpadky a dáta
 
-Fotografie sú predvolene vypnuté. Po zapnutí možno snímku konkrétneho balíka pridať, preskočiť alebo nahradiť. Snímka sa zmenší a server odstráni metadáta. Neúspešné nahratie nevracia už prijatý balík ani jeho polohu späť. Fotografie a doklady sú prístupné iba po prihlásení.
+Fotografie sú predvolene vypnuté. Po zapnutí možno snímku konkrétneho balíka pridať, preskočiť alebo nahradiť. Aplikácia ju automaticky zmenší ešte v telefóne: najdlhšia strana má najviac 640 pixelov a JPEG najviac 40 KiB. Kvalita začína na 70 %; pri náročnom zábere sa podľa potreby zníži kvalita alebo rozmery. Malé snímky sa nezväčšujú a natočenie fotografie sa zachová. Server nezávisle overí rovnaké limity a odstráni metadáta. Nič netreba nastavovať pri každom fotení. Neúspešné nahratie nevracia už prijatý balík ani jeho polohu späť. Fotografie a doklady sú prístupné iba po prihlásení.
 
 Rozpracovaná dávka sa jednoducho zálohuje v prehliadači pre daný SPS účet, bez hesiel a PIN-ov. Nie je to offline systém: spoločné police a SPS operácie potrebujú sieť. Pri obnovení stránky sa úspešné operácie neposielajú znovu.
 

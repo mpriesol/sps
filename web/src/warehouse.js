@@ -6,6 +6,8 @@ const $ = id => document.getElementById(id);
 const el = (tag, content = '', cls = '') => { const node = document.createElement(tag); node.textContent = content; node.className = cls; return node; };
 const button = (label, action, cls = 'secondary compact') => { const node = el('button', label, cls); node.type = 'button'; node.addEventListener('click', action); return node; };
 const statuses = { unconfirmed: 'Príjem do SPS nepotvrdený', accepted: 'Prijatý v SPS', accept_uncertain: 'Príjem treba overiť v SPS', delivery_uncertain: 'Výdaj treba overiť v SPS', return_uncertain: 'Vrátenie treba overiť v SPS', delivered: 'Vydaný zákazníkovi', returned: 'Odovzdaný kuriérovi' };
+const PHOTO_MAX_EDGE = 640, PHOTO_MAX_BYTES = 40 * 1024;
+const PHOTO_QUALITIES = [.70, .58, .46];
 
 export class WarehouseWorkspace {
   constructor({ api, feedback, beep, state, stopInput, renderReceipt }) {
@@ -29,7 +31,7 @@ export class WarehouseWorkspace {
     const photo = el('dialog'); photo.id = 'photo-dialog'; photo.innerHTML = '<h2>Fotografia balíka</h2><p id="photo-number" class="mono"></p><img id="photo-preview" class="photo-preview" alt="Náhľad fotografie balíka" hidden><p id="photo-error" class="error-text" role="alert"></p><div class="photo-actions"><button id="photo-frame" type="button" class="secondary">Odfotiť z kamery</button><button id="photo-file-button" type="button" class="secondary">Fotoaparát / súbor</button><input id="photo-file" type="file" accept="image/*" capture="environment" hidden></div><p class="footnote">Odtiahni telefón tak, aby bolo vidieť celý balík. Skenovanie kódov je zatiaľ pozastavené.</p><div class="dialog-actions"><button id="photo-cancel" type="button" class="secondary">Preskočiť</button><button id="photo-save" type="button" class="primary" disabled>Uložiť fotku</button></div>';
     document.body.append(photo);
     $('photo-cancel').addEventListener('click', () => photo.close());
-    photo.addEventListener('close', () => { this.photoBusy = false; this.photoData = null; $('photo-file').value = ''; });
+    photo.addEventListener('close', () => { this.photoBusy = false; this.photoData = null; this.photoGeneration = (this.photoGeneration || 0) + 1; $('photo-file').value = ''; });
     $('photo-frame').addEventListener('click', () => {
       const video = $('video'); if (!video.videoWidth) return;
       this.preparePhoto(video, video.videoWidth, video.videoHeight);
@@ -37,12 +39,19 @@ export class WarehouseWorkspace {
     $('photo-file-button').addEventListener('click', () => $('photo-file').click());
     $('photo-file').addEventListener('change', async () => {
       const file = $('photo-file').files[0]; if (!file) return;
-      if (!file.type.startsWith('image/') || file.size > 20 * 1024 * 1024) { $('photo-error').textContent = 'Vyber fotografiu do 20 MB.'; return; }
+      const generation = this.photoGeneration = (this.photoGeneration || 0) + 1;
+      const current = () => generation === this.photoGeneration && photo.open;
+      this.photoData = null; $('photo-preview').hidden = true; $('photo-save').disabled = true; $('photo-save').textContent = 'Pripravujem…'; $('photo-error').textContent = '';
+      if (!file.type.startsWith('image/') || file.size > 20 * 1024 * 1024) { $('photo-error').textContent = 'Vyber fotografiu do 20 MB.'; $('photo-save').textContent = 'Uložiť fotku'; return; }
       try {
         const url = URL.createObjectURL(file), image = new Image();
-        try { image.src = url; await image.decode(); this.preparePhoto(image, image.naturalWidth, image.naturalHeight); }
+        try {
+          image.src = url; await image.decode();
+          if (current()) await this.preparePhoto(image, image.naturalWidth, image.naturalHeight);
+        }
         finally { URL.revokeObjectURL(url); }
-      } catch { $('photo-error').textContent = 'Fotografiu sa nepodarilo načítať. Skús JPEG alebo PNG.'; }
+      } catch { if (current()) $('photo-error').textContent = 'Fotografiu sa nepodarilo načítať. Skús JPEG alebo PNG.'; }
+      finally { if (current()) $('photo-save').textContent = 'Uložiť fotku'; }
     });
     $('photo-save').addEventListener('click', async () => {
       if (!this.photoData || !this.photoNumber) return;
@@ -412,11 +421,50 @@ export class WarehouseWorkspace {
   }
 
   openPhoto(number) {
-    this.photoNumber = number; this.photoData = null; this.photoBusy = true; $('photo-number').textContent = `${suffix(number)} · ${number}`; $('photo-preview').hidden = true; $('photo-error').textContent = ''; $('photo-save').disabled = true; $('photo-frame').disabled = !$('video').videoWidth; $('photo-dialog').showModal();
+    this.photoGeneration = (this.photoGeneration || 0) + 1;
+    this.photoNumber = number; this.photoData = null; this.photoBusy = true; $('photo-number').textContent = `${suffix(number)} · ${number}`; $('photo-preview').hidden = true; $('photo-error').textContent = ''; $('photo-save').disabled = true; $('photo-save').textContent = 'Uložiť fotku'; $('photo-frame').disabled = !$('video').videoWidth; $('photo-dialog').showModal();
   }
-  preparePhoto(source, width, height) {
-    const scale = Math.min(1, 1100 / Math.max(width, height)); const canvas = document.createElement('canvas'); canvas.width = Math.round(width * scale); canvas.height = Math.round(height * scale);
-    canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height); this.photoData = canvas.toDataURL('image/jpeg', .78); $('photo-preview').src = this.photoData; $('photo-preview').hidden = false; $('photo-error').textContent = ''; $('photo-save').disabled = false;
+  async preparePhoto(source, width, height) {
+    const generation = this.photoGeneration = (this.photoGeneration || 0) + 1;
+    const current = () => generation === this.photoGeneration && $('photo-dialog').open;
+    this.photoData = null; $('photo-save').disabled = true; $('photo-save').textContent = 'Pripravujem…'; $('photo-error').textContent = '';
+    try {
+      if (!(width > 0 && height > 0)) throw new Error('Fotografiu sa nepodarilo načítať.');
+      const canvas = document.createElement('canvas'), captured = document.createElement('canvas');
+      // HTMLImageElement.decode() honors EXIF orientation. Drawing its decoded
+      // pixels also drops camera metadata before anything leaves the device.
+      const captureScale = Math.min(1, PHOTO_MAX_EDGE / Math.max(width, height));
+      captured.width = Math.max(1, Math.round(width * captureScale)); captured.height = Math.max(1, Math.round(height * captureScale));
+      const captureContext = captured.getContext('2d'); captureContext.imageSmoothingQuality = 'high';
+      captureContext.fillStyle = '#ffffff'; captureContext.fillRect(0, 0, captured.width, captured.height);
+      captureContext.drawImage(source, 0, 0, captured.width, captured.height);
+      // Freeze a camera frame once; slower encodes must not photograph a later
+      // frame after the operator has already moved the phone to another parcel.
+      let edge = Math.max(captured.width, captured.height);
+      while (current()) {
+        const scale = Math.min(1, edge / Math.max(captured.width, captured.height));
+        canvas.width = Math.max(1, Math.round(captured.width * scale)); canvas.height = Math.max(1, Math.round(captured.height * scale));
+        const context = canvas.getContext('2d'); context.imageSmoothingQuality = 'high';
+        context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(captured, 0, 0, canvas.width, canvas.height);
+        for (const quality of PHOTO_QUALITIES) {
+          // toBlob yields while the browser encodes; the scanner stays paused.
+          const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+          if (!current()) return;
+          if (!blob || blob.type !== 'image/jpeg') throw new Error('Prehliadač nedokáže pripraviť fotografiu JPEG.');
+          if (blob.size > PHOTO_MAX_BYTES) continue;
+          const data = await new Promise((resolve, reject) => {
+            const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Fotografiu sa nepodarilo načítať.')); reader.readAsDataURL(blob);
+          });
+          if (!current()) return;
+          this.photoData = data; $('photo-preview').src = data; $('photo-preview').hidden = false; $('photo-save').disabled = false;
+          return;
+        }
+        if (edge <= 128) throw new Error('Fotografiu sa nepodarilo zmenšiť. Skús ju odfotiť znova.');
+        edge = Math.max(128, Math.floor(edge * .8));
+      }
+    } catch (error) { if (current()) $('photo-error').textContent = error.message; }
+    finally { if (current()) $('photo-save').textContent = 'Uložiť fotku'; }
   }
 
   async history(number) {

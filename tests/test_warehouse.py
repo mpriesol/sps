@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from PIL import Image
 
-from app.warehouse import Warehouse, WarehouseError
+from app.warehouse import PHOTO_MAX_BYTES, PHOTO_MAX_EDGE, Warehouse, WarehouseError
 
 
 @pytest.fixture
@@ -239,14 +239,61 @@ def test_photos_are_private_reencoded_and_do_not_change_carrier_or_location(stor
     assert saved["photo_url"].startswith("./api/parcels/001/photo?")
     path = store.photo_path("001")
     with Image.open(path) as image:
-        assert image.width == 1600
+        assert image.width == PHOTO_MAX_EDGE == 640
+        assert image.height == 320
+        assert image.format == "JPEG"
         assert not image.getexif()
+    assert path.stat().st_size <= PHOTO_MAX_BYTES == 40 * 1024
     with pytest.raises(WarehouseError):
         store.store_photo("001", "data:image/jpeg;base64,not-a-picture")
     assert store.photo_path("001") == path
     store.store_photo("001", jpeg_data_url())
     assert not path.exists()
     assert len(list(store.photo_dir.iterdir())) == 1
+
+
+@pytest.mark.parametrize("dimensions", [(1600, 1200), (640, 640)])
+def test_noisy_photos_have_a_hard_size_limit_even_when_quality_alone_is_not_enough(store, dimensions):
+    store.register_parcel("NOISY001")
+    store.update_settings({"photos": True})
+    original = Image.effect_noise(dimensions, 100).convert("RGB")
+    stream = io.BytesIO()
+    original.save(stream, "JPEG", quality=80)
+    assert 40 * 1024 < len(stream.getvalue()) < 1_500_000
+    data = "data:image/jpeg;base64," + base64.b64encode(stream.getvalue()).decode()
+    store.store_photo("NOISY001", data)
+    output = store.photo_path("NOISY001")
+    assert output.stat().st_size <= 40 * 1024
+    with Image.open(output) as saved:
+        saved.load()
+        assert saved.format == "JPEG"
+        assert max(saved.size) <= 640
+        assert min(saved.size) >= 128
+        assert not saved.getexif()
+
+
+def test_photo_orientation_is_baked_into_pixels_without_metadata_or_upscaling(store):
+    store.register_parcel("ORIENT001")
+    store.update_settings({"photos": True})
+    original = Image.new("RGB", (200, 100), "red")
+    original.paste("blue", (100, 0, 200, 100))
+    exif = Image.Exif()
+    exif[274] = 6  # Rotate stored landscape pixels clockwise for portrait display.
+    exif[305] = "private camera details"
+    source = io.BytesIO()
+    original.save(source, "JPEG", quality=95, exif=exif, icc_profile=b"private profile")
+    store.store_photo("ORIENT001", "data:image/jpeg;base64," + base64.b64encode(source.getvalue()).decode())
+    path = store.photo_path("ORIENT001")
+    assert path.stat().st_size <= 40 * 1024
+    assert b"private" not in path.read_bytes()
+    with Image.open(path) as saved:
+        assert saved.size == (100, 200)  # Honor orientation; never enlarge a small image.
+        assert saved.format == "JPEG"
+        assert not saved.getexif()
+        assert "icc_profile" not in saved.info
+        top, bottom = saved.getpixel((50, 20)), saved.getpixel((50, 180))
+        assert top[0] > 180 and top[2] < 70
+        assert bottom[2] > 180 and bottom[0] < 70
 
 
 def test_account_databases_and_preferences_do_not_leak(tmp_path):

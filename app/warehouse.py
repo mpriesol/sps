@@ -25,6 +25,30 @@ DEFAULT_SETTINGS = {
 }
 TERMINAL = {"delivered", "returned"}
 CARRIER_STATES = {"unconfirmed", "accepted", "accept_uncertain", "delivery_uncertain", "return_uncertain", *TERMINAL}
+PHOTO_MAX_EDGE = 640
+PHOTO_MAX_BYTES = 40 * 1024
+PHOTO_QUALITIES = (70, 58, 46)
+
+
+def compact_photo(original):
+    """Return a small, upright JPEG; neither metadata nor input size are trusted."""
+    from PIL import Image, ImageOps
+    clean = ImageOps.exif_transpose(original).convert("RGB")
+    clean.thumbnail((PHOTO_MAX_EDGE, PHOTO_MAX_EDGE), Image.Resampling.LANCZOS)
+    clean.info.clear()
+    while True:
+        for quality in PHOTO_QUALITIES:
+            encoded = io.BytesIO()
+            clean.save(encoded, "JPEG", quality=quality, optimize=True, subsampling=2)
+            if encoded.tell() <= PHOTO_MAX_BYTES:
+                return encoded.getvalue()
+        # Prefer keeping recognizable detail at the normal size. Extremely
+        # noisy photos get a smaller image instead of an unbounded payload.
+        longest = max(clean.size)
+        if longest <= 128:
+            raise WarehouseError(422, "Fotografiu sa nepodarilo zmenšiť. Skúste ju odfotiť znova.")
+        edge = max(128, int(longest * 0.8))
+        clean.thumbnail((edge, edge), Image.Resampling.LANCZOS)
 
 
 class WarehouseError(Exception):
@@ -528,10 +552,7 @@ class Warehouse:
                 if original.format != "JPEG" or original.width * original.height > 20_000_000:
                     raise WarehouseError(422, "Použite bežnú fotografiu JPEG.")
                 original.load()
-                clean = original.convert("RGB")
-                clean.thumbnail((1600, 1600))
-                encoded = io.BytesIO()
-                clean.save(encoded, "JPEG", quality=80, optimize=True)
+                encoded = compact_photo(original)
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
             raise WarehouseError(422, "Fotografia je poškodená alebo má neplatný formát.") from exc
         self.photo_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -540,7 +561,7 @@ class Warehouse:
         old = None
         try:
             with target.open("xb") as file:
-                file.write(encoded.getvalue())
+                file.write(encoded)
             os.chmod(target, 0o600)
             with self._db(write=True) as db:
                 row = self._find(db, number)

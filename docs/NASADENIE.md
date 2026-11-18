@@ -141,7 +141,7 @@ Obnov stránku a znovu sa prihlás. Demo označenie zmizne a aplikácia načíta
 
 ## Aktualizácia
 
-Pred aktualizáciou zálohuj celý existujúci volume. Názov volume sa nemení, uložené heslá sa zachovajú a databáza sa vytvorí automaticky vedľa nich. `sps.env` netreba meniť. **Kvôli voliteľným fotografiám zvýš v existujúcom `handle /sps/*` limit Caddy z `64KB` na `3MB`**, over konfiguráciu a načítaj ju. Backend ďalej obmedzuje bežné požiadavky na 64 KB, hromadné operácie na 500 KB a fotografiu na 2,5 MB vrátane obalu.
+Pred aktualizáciou zálohuj celý existujúci volume. Názov volume sa nemení, uložené heslá sa zachovajú a databáza sa vytvorí automaticky vedľa nich. `sps.env` netreba meniť. Fotografia sa ešte v telefóne automaticky zmenší na najviac 640 px a 40 KiB; celá požiadavka má približne do 55 KB. **Pre fotografie z aplikácie preto netreba zvyšovať pôvodný limit Caddy `64KB`.** Ukážkový limit `3MB` umožňuje aj väčšie hromadné operácie a vstupy cez API; ak ho meníš, najprv over konfiguráciu a až potom ju načítaj. Backend samostatne obmedzuje bežné požiadavky na 64 KB, hromadné operácie na 500 KB a vstup fotografie na 2,5 MB vrátane obalu; uložený JPEG má vždy najviac 40 KiB.
 
 
 ```bash
