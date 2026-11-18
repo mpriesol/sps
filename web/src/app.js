@@ -70,7 +70,7 @@ function scanCode(value, expectedVoiceContext = null) {
   return scanQueue;
 }
 
-async function processScan(value) {
+async function processScan(value, { scanned = true } = {}) {
   if (state.preparing || state.receiving || workspace.photoBusy || document.querySelector('dialog[open]')) return;
   const code = normalizeCode(value);
   if (await workspace.scan(code)) return;
@@ -80,7 +80,7 @@ async function processScan(value) {
   beep(result.kind);
   if (result.kind === 'duplicate') {
     feedback(`${code} už je vybraný.`, 'warning');
-    if ((workspace.receiptPlacementEnabled?.() || workspace.settings.photos) && workspace.receiptNumber !== code && !receiptSelectionLocked(state.selected.get(code))) await workspace.onReceiptParcel(code);
+    if ((workspace.receiptPlacementEnabled?.() || workspace.settings.photos) && workspace.receiptNumber !== code && !receiptSelectionLocked(state.selected.get(code))) await workspace.onReceiptParcel(code, scanned);
     return;
   }
   if (result.kind === 'unknown') return feedback(`${code}: nie je v zozname SPS. Skús iný kód na štítku alebo obnov zoznam.`, 'error');
@@ -88,7 +88,7 @@ async function processScan(value) {
   state.selected.set(result.code, { ...result.shipment, state: 'pending', message: '' });
   feedback(`✓ ${suffix(code)} · ${result.shipment.trackNumber} · pridané do dávky`, 'success');
   render();
-  try { await workspace.onReceiptParcel(code); }
+  try { await workspace.onReceiptParcel(code, scanned); }
   catch (error) { feedback(`Balík je v dávke, ale lokálny záznam sa neuložil: ${error.message}`, 'error'); }
 }
 
@@ -108,7 +108,7 @@ function toggleReceipt(code) {
       state.selected.delete(code); state.finished = receiptComplete(state.selected);
       if (workspace.receiptNumber === code) { workspace.receiptNumber = null; workspace.renderReceiptActive(); }
       feedback(`${code} · výber zrušený.`); render();
-    } else await processScan(code);
+    } else await processScan(code, { scanned: false });
   }).catch(error => feedback(error.message, 'error'));
 }
 
@@ -189,8 +189,13 @@ function currentVoiceContext() {
   return workspace?.voiceContext?.() || { key: workspace?.view || '', candidates: state.shipments, selected: state.selected, requireFullCode: false, enabled: workspace?.view === 'receipt', prompt: 'Povedz posledné 2 znaky' };
 }
 
+function scannerVisible() {
+  return !!workspace && !$('scanner-workspace').hidden && ['receipt', 'store', 'pickup', 'returns', 'dropoff'].includes(workspace.view)
+    && (workspace.view !== 'pickup' || workspace.settings.pickup_scan_required === true);
+}
+
 function voiceAllowed() {
-  if (!workspace || !state.csrf) return false;
+  if (!scannerVisible() || !state.csrf) return false;
   return !!currentVoiceContext().enabled && !state.loading && !state.preparing && !state.receiving && !workspace.viewLoading && !workspace.busy && !workspace.returnBusy && !workspace.photoBusy && !(workspace.view === 'receipt' && state.finished) && !document.querySelector('dialog[open]');
 }
 
@@ -201,15 +206,20 @@ function resumeVoiceIfAllowed() {
 
 function syncVoiceContext() {
   if (!workspace) return;
+  if (!scannerVisible()) {
+    if (voice.active) voice.stop();
+    if (scanner || cameraStarting) stopCamera();
+    return;
+  }
   const context = currentVoiceContext();
   const changed = currentVoiceKey !== context.key;
   if (!voice.active || changed) {
     $('voice-prompt').textContent = context.prompt || (context.requireFullCode ? 'Povedz celé číslo balíka' : 'Povedz posledné 2 znaky');
-    $('voice-help').textContent = context.requireFullCode ? 'Pre overenie výdaja povedz každý znak celého čísla alebo naskenuj celý kód.' : context.allowLocationNames ? 'Koniec kódu po znakoch. Pre policu povedz napríklad „miesto á jedna“.' : 'Každý znak zvlášť, napríklad „pé tri“.';
+    $('voice-help').textContent = context.allowUnknownFullCode ? 'Povedz celé číslo po znakoch. Nový príjem potvrdíš až po kontrole čísla.' : context.requireFullCode ? 'Pre overenie výdaja povedz každý znak celého čísla alebo naskenuj celý kód.' : context.allowLocationNames ? 'Koniec kódu po znakoch. Pre policu povedz napríklad „miesto á jedna“.' : 'Každý znak zvlášť, napríklad „pé tri“.';
     currentVoiceKey = context.key;
   }
   if (!voice.active) return;
-  if (!state.csrf || !['receipt', 'store', 'pickup', 'returns'].includes(workspace.view) || (workspace.view === 'receipt' && state.finished) || (workspace.view === 'pickup' && !workspace.pickup)) { voice.stop(); return; }
+  if (!state.csrf || (workspace.view === 'receipt' && state.finished) || (workspace.view === 'pickup' && !workspace.pickup)) { voice.stop(); return; }
   if (!voiceAllowed()) {
     cancelVoicePrompt(); voice.pause(); voiceSuspended = true;
     return;
@@ -224,17 +234,18 @@ function scanSpeech(transcript, contextKey) {
   const context = currentVoiceContext();
   if (contextKey !== undefined && contextKey !== null && contextKey !== context.key) { syncVoiceContext(); return; }
   const location = context.allowLocationNames ? matchSpokenLocation(transcript, workspace.locations) : null;
-  const result = location || (context.requireFullCode ? matchSpokenFullCode(transcript, context.candidates, context.selected) : matchSpokenSuffix(transcript, context.candidates, context.selected));
+  const result = location || (context.requireFullCode ? matchSpokenFullCode(transcript, context.candidates, context.selected, { allowUnknown: context.allowUnknownFullCode === true }) : matchSpokenSuffix(transcript, context.candidates, context.selected));
   $('voice-transcript').textContent = `Počul som: „${transcript.slice(0, 100)}“${result.suffix ? ` → ${result.suffix}` : ''}`;
   if (result.kind === 'match') { $('voice-prompt').textContent = context.prompt; scanCode(result.code, context.key); return; }
-  if (context.requireFullCode && workspace.pickup) { workspace.pickup.verified = false; workspace.render(); }
+  if (workspace.view === 'pickup' && context.requireFullCode && workspace.pickup) { workspace.pickup.verified = false; workspace.render(); }
+  if (workspace.view === 'dropoff' && workspace.dropoff) { workspace.dropoff = null; workspace.render(); }
   beep('unknown');
   if (result.location) {
     feedback(result.kind === 'ambiguous' ? 'Tento názov má viac miest. Použi čiarový kód konkrétneho miesta.' : 'Miesto s týmto názvom sa nenašlo. Povedz celý názov alebo naskenuj jeho kód.', 'warning');
     sayVoicePrompt('Miesto sa nedá jednoznačne určiť. Použi jeho čiarový kód.');
   } else if (context.requireFullCode) {
     $('voice-prompt').textContent = 'Povedz celé číslo balíka';
-    feedback('Na overenie výdaja treba celé číslo balíka. Samotná koncovka nestačí.', 'warning');
+    feedback(context.allowUnknownFullCode ? 'Na príjem od zákazníka povedz celé číslo balíka, aspoň 6 znakov. Samotná koncovka nestačí.' : 'Na overenie výdaja treba celé číslo balíka. Samotná koncovka nestačí.', 'warning');
     sayVoicePrompt('Povedz celé číslo balíka, každý znak zvlášť.');
   } else if (result.kind === 'ambiguous') {
     const length = result.suffix.length + 1;
@@ -266,6 +277,8 @@ function render() {
   const workflowBusy = busy || workspace.busy || workspace.returnBusy;
   $('work-view').setAttribute('aria-busy', String(workflowBusy));
   for (const node of $('workspace-nav').children) node.disabled = workflowBusy;
+  for (const node of $('tools-menu').querySelectorAll('button')) node.disabled = workflowBusy;
+  $('more-tools').disabled = workflowBusy;
   const receipt = workspace.view === 'receipt';
   const n = state.selected.size, remaining = remainingItems(state.selected).length;
   const accepted = [...state.selected.values()].filter(x => x.state === 'accepted').length;
@@ -280,7 +293,7 @@ function render() {
   $('new-receipt').hidden = !state.finished;
   $('refresh').disabled = busy;
   $('manage-couriers').disabled = busy || workspace.busy || workspace.returnBusy;
-  $('scan').disabled = (receipt && (busy || state.finished)) || cameraStarting || workspace.busy || workspace.returnBusy || workspace.viewLoading;
+  $('scan').disabled = !scannerVisible() || (receipt && (busy || state.finished)) || cameraStarting || workspace.busy || workspace.returnBusy || workspace.viewLoading;
   $('voice').disabled = (!voice.active && !voiceAllowed()) || cameraStarting;
   $('manual-add').disabled = (receipt && (busy || state.finished)) || workspace.busy || workspace.returnBusy || workspace.viewLoading;
   $('manual-code').disabled = (receipt && (busy || state.finished)) || workspace.busy || workspace.returnBusy || workspace.viewLoading;
@@ -319,22 +332,33 @@ function scheduleCouriers() {
 }
 
 function renderCatalog() {
-  const list = $('receipt-list'), focused = list.contains(document.activeElement) ? document.activeElement.dataset.code : null;
+  const list = $('receipt-list');
   const rows = receiptItems(state.shipments, state.selected, $('search').value);
   const busy = state.loading || state.receiving || state.preparing || workspace.viewLoading;
   const labels = { accepted: 'Príjem potvrdený', sending: 'Odosielam do SPS', uncertain: 'Nejasný výsledok — otvor overenie', failed: 'Príjem sa nepodaril' };
-  list.replaceChildren();
+  // Keep focused tiles and the browser's scroll anchor in the document. Clearing
+  // the grid and focusing a partly rebuilt list can clamp a scrolled viewport.
+  const existing = new Map([...list.children].map(tile => [tile.dataset.code, tile]));
+  let next = list.firstElementChild;
   for (const item of rows) {
-    const tile = text('button', item.trackNumber || item.code, `parcel-tile ${item.isSelected ? 'is-selected' : ''} ${item.state || ''}`);
-    tile.type = 'button'; tile.dataset.code = item.code; tile.setAttribute('aria-pressed', String(item.isSelected));
+    let tile = existing.get(item.code);
+    if (!tile) {
+      tile = text('button', item.trackNumber || item.code);
+      tile.type = 'button'; tile.dataset.code = item.code;
+      tile.addEventListener('click', () => { initAudio(); toggleReceipt(item.code); });
+    }
+    const label = item.trackNumber || item.code;
+    if (tile.textContent !== label) tile.textContent = label;
+    tile.className = `parcel-tile ${item.isSelected ? 'is-selected' : ''} ${item.state || ''}`;
+    tile.setAttribute('aria-pressed', String(item.isSelected));
     const description = labels[item.state] || (item.isSelected ? 'Vybraný na príjem' : 'Vybrať na príjem');
     tile.title = `${description}${item.message ? ` · ${item.message}` : ''}`;
     tile.setAttribute('aria-label', `${item.trackNumber || item.code} · ${description}`);
     tile.disabled = busy || state.finished || ['accepted', 'sending'].includes(item.state);
-    tile.addEventListener('click', () => { initAudio(); toggleReceipt(item.code); });
-    list.append(tile);
-    if (focused === item.code) tile.focus({ preventScroll: true });
+    if (tile !== next) list.insertBefore(tile, next);
+    next = tile.nextElementSibling;
   }
+  while (next) { const removed = next; next = next.nextElementSibling; removed.remove(); }
   $('catalog-count').textContent = receiptItems(state.shipments, state.selected).length;
   $('catalog-empty').hidden = rows.length > 0;
   $('select-all').disabled = busy || state.finished || state.selected.size >= 200 || !rows.some(item => !item.isSelected && state.shipments.has(item.code));
@@ -374,6 +398,7 @@ function stopCamera() {
 async function startCamera() {
   voice.stop();
   if (scanner) { stopCamera(); return; }
+  if (!scannerVisible() || state.preparing || state.receiving || workspace.busy || workspace.returnBusy || workspace.viewLoading || (workspace.view === 'receipt' && state.finished)) return;
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     feedback('Fotoaparát potrebuje HTTPS. Otvor aplikáciu cez jej zabezpečenú adresu.', 'error'); return;
   }
@@ -619,6 +644,7 @@ function showLogin() {
   stopCamera(); $('confirm-dialog').close(); $('courier-password').value = '';
   clearRevealedPassword(); managerLoad++; $('passwords-dialog').close(); $('managed-password').value = ''; state.couriers = []; managedCouriers = []; savedCouriers = [];
   $('manage-couriers').hidden = true;
+  closeToolsMenu(); $('more-tools').hidden = true;
   clearTimeout(courierTimer); courierRequest++; courierFingerprint = '';
   workspace.reset(); state.courierId = '';
   state.csrf = ''; $('login-view').hidden = false; $('work-view').hidden = true; $('logout').hidden = true;
@@ -627,11 +653,27 @@ function showLogin() {
 async function showWork(session) {
   state.csrf = session.csrf; state.demo = session.demo;
   $('manage-couriers').hidden = false;
+  $('more-tools').hidden = false;
   $('login-view').hidden = true; $('work-view').hidden = false; $('logout').hidden = false;
   $('demo-banner').hidden = !session.demo; $('demo-add').hidden = !session.demo; $('demo-password').hidden = !session.demo;
   try { await workspace.start(session); } catch (error) { workspace.notice(error.message, 'error'); }
   await loadShipments();
 }
+
+function closeToolsMenu() {
+  $('tools-menu').hidden = true; $('more-tools').setAttribute('aria-expanded', 'false');
+}
+
+$('more-tools').addEventListener('click', () => {
+  const open = $('tools-menu').hidden;
+  if (open) { voice.stop(); stopCamera(); }
+  $('tools-menu').hidden = !open; $('more-tools').setAttribute('aria-expanded', String(open));
+});
+$('tools-menu').addEventListener('click', event => { if (event.target.closest('button')) closeToolsMenu(); });
+document.addEventListener('pointerdown', event => { if (!event.target.closest('.more-tools-wrap')) closeToolsMenu(); });
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('tools-menu').hidden) { closeToolsMenu(); $('more-tools').focus({ preventScroll: true }); }
+});
 
 $('login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('login-button').disabled = true; $('login-error').textContent = '';
@@ -644,7 +686,7 @@ $('logout').addEventListener('click', async () => {
   try { await api('logout', {}); workspace.saveDraft(); workspace.account = ''; state.selected.clear(); state.shipments.clear(); state.finished = false; showLogin(); }
   catch (error) { feedback(error.message, 'error'); }
 });
-$('manual-form').addEventListener('submit', event => { event.preventDefault(); initAudio(); scanCode($('manual-code').value); $('manual-code').value = ''; });
+$('manual-form').addEventListener('submit', event => { event.preventDefault(); if ($('manual-form').hidden || !scannerVisible()) return; initAudio(); scanCode($('manual-code').value); $('manual-code').value = ''; });
 $('scan').addEventListener('click', startCamera);
 $('voice').addEventListener('click', toggleVoice);
 $('torch').addEventListener('click', async () => { try { torchOn = !torchOn; await scanner?.switchTorch?.(torchOn); $('torch').textContent = torchOn ? 'Vypnúť svetlo' : 'Prisvietiť'; } catch { feedback('Tento fotoaparát nepodporuje prisvietenie.', 'warning'); } });

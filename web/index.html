@@ -9,7 +9,7 @@
   <title>Balíky a police · SPS</title>
 </head>
 <body>
-  <header class="topbar"><div class="brand"><span class="brand-icon" aria-hidden="true">▣</span><strong>Balíky a police</strong></div><div class="top-actions"><button id="manage-couriers" class="text-button" hidden>Kuriéri</button><button id="logout" class="text-button" hidden>Odhlásiť</button></div></header>
+  <header class="topbar"><div class="brand"><span class="brand-icon" aria-hidden="true">▣</span><strong>Balíky a police</strong></div><div class="top-actions"><button id="manage-couriers" class="text-button" hidden>Kuriéri</button><div class="more-tools-wrap"><button id="more-tools" class="text-button" aria-expanded="false" aria-controls="tools-menu" hidden>Viac</button><nav id="tools-menu" class="tools-menu" aria-label="Ďalšie nástroje" hidden></nav></div><button id="logout" class="text-button" hidden>Odhlásiť</button></div></header>
   <main>
     <section id="login-view" class="login-card card">
       <span class="eyebrow">VÝDAJNÉ MIESTO</span><h1>Balíky prijaté.<br>Za pár skenov.</h1><p class="muted">Prihlás sa a načítaj zásielky fotoaparátom mobilu.</p>
@@ -35,16 +35,15 @@
         <div id="voice-placeholder" class="voice-placeholder" hidden><strong id="voice-prompt">Povedz posledné 2 znaky</strong><span id="voice-help">Každý znak zvlášť, napríklad „pé tri“.</span><p id="voice-transcript" aria-live="polite"></p></div>
         <p id="scan-feedback" class="feedback" role="status" aria-live="polite">Načítavam zoznam zo SPS…</p>
       </section>
-      <form id="manual-form" class="manual-form"><label class="sr-only" for="manual-code">Číslo zásielky</label><input id="manual-code" placeholder="Alebo zadaj číslo zásielky" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="100"><button class="secondary" id="manual-add" aria-label="Pridať zásielku">Pridať</button></form>
+      <form id="manual-form" class="manual-form" hidden><label class="sr-only" for="manual-code">Číslo zásielky</label><input id="manual-code" placeholder="Alebo zadaj číslo zásielky" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="100"><button class="secondary" id="manual-add" aria-label="Pridať zásielku">Pridať</button></form>
       <button id="demo-add" class="demo-add" hidden>+ Pridať skúšobný balík</button>
       </div>
       <section id="warehouse-panel" hidden></section>
       <div id="receipt-area">
-      <div id="receipt-active" class="receipt-active-hint" hidden></div>
       <section class="card receipt-catalog"><div class="section-title"><h2>Balíky <span id="catalog-count" class="count-badge">0</span></h2><div class="list-actions"><span id="available-count" class="muted">— v SPS</span><button id="refresh" class="secondary compact">Obnoviť</button></div></div><div class="receipt-selection-tools"><span>Vybrané: <strong id="selected-count">0</strong></span><button id="select-all" class="secondary compact" aria-label="Vybrať všetky zobrazené balíky">Všetky</button><button id="clear-selection" class="secondary compact">Zrušiť výber</button></div><label class="sr-only" for="search">Hľadať číslo balíka</label><input id="search" placeholder="Filtrovať číslo balíka" type="search" autocomplete="off"><div id="receipt-list" class="parcel-grid" role="group" aria-label="Výber balíkov na príjem"></div><p id="catalog-empty" class="muted" hidden>Nenašli sa žiadne balíky.</p><p id="receipt-selection-note" class="selection-note" role="status"></p></section>
       <section id="result" class="result card" hidden aria-live="polite"><span class="eyebrow">VÝSLEDOK PRÍJMU</span><h2 id="result-title"></h2><p id="result-text"></p></section>
       <p class="footnote">Príjem do SPS sa potvrdí až tlačidlom Prijať. Miesto balíka sa ukladá samostatne.</p>
-      <div class="bottom-bar"><div class="receipt-courier-field"><div class="courier-inline"><label for="receipt-courier">Kuriér</label><select id="receipt-courier" disabled><option value="">Najprv vyber balík</option></select></div><span id="courier-warning" class="courier-warning" hidden></span></div><div class="receipt-submit-row"><div><strong id="bottom-count">0 balíkov</strong><span id="bottom-help">Pripravené na skenovanie</span></div><button id="prepare" class="primary" disabled>Prijať balíky</button><button id="new-receipt" class="primary" hidden>Nový príjem</button></div></div>
+      <div class="bottom-bar"><div class="receipt-courier-field"><div id="receipt-active" class="receipt-active-hint" hidden></div><div class="courier-inline"><label for="receipt-courier">Kuriér</label><select id="receipt-courier" disabled><option value="">Najprv vyber balík</option></select></div><span id="courier-warning" class="courier-warning" hidden></span></div><div class="receipt-submit-row"><div><strong id="bottom-count">0 balíkov</strong><span id="bottom-help">Pripravené na skenovanie</span></div><button id="prepare" class="primary" disabled>Prijať balíky</button><button id="new-receipt" class="primary" hidden>Nový príjem</button></div></div>
       </div>
     </section>
   </main>

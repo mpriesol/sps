@@ -413,3 +413,121 @@ async def test_demo_outgoing_does_not_need_customer_registration_to_be_handed_ov
     with pytest.raises(SPSError):
         await sps.return_parcel('CUSTOMER_NOT_REGISTERED', 1, 'demo')
     await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('accepted', ['cargonetAccepted', 'cdexAccepted'])
+async def test_customer_dropoff_uses_verified_body_and_explicit_success(accepted):
+    calls = []
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': {'id': 12, 'supportdropoff': True}})
+        assert request.method == 'POST' and request.url.path.endswith('/insertShipmentForDropoff')
+        assert json.loads(request.content) == {'trackNumber': '00123456789'}
+        return httpx.Response(200, json={accepted: True})
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    await sps.dropoff('00123456789')
+    assert calls == [('POST', '/psappserver/rest/login'), ('POST', '/psappserver/rest/insertShipmentForDropoff')]
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('response', [
+    {'error': 'DROPOFF_DISABLED'}, {'error': 'INVALID_TRACKNUMBER_LENGTH'},
+    {'cargonetAccepted': False, 'cdexAccepted': False},
+])
+async def test_explicit_dropoff_rejection_is_not_uncertain_or_accepted(response):
+    def handler(request):
+        return httpx.Response(200, json={'parcelshop': {'id': 12, 'supportdropoff': True}}
+                              if request.url.path.endswith('/login') else response)
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    with pytest.raises(SPSError) as caught:
+        await sps.dropoff('00123456789')
+    assert not isinstance(caught.value, OperationUncertainError)
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('response', [None, {}, [], {'success': True}, {'cargonetAccepted': 1},
+                                      {'cargonetAccepted': 'true'}, {'cargonetAccepted': True, 'error': 'DROPOFF_DISABLED'}])
+async def test_ambiguous_dropoff_json_never_manufactures_acceptance(response):
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': {'id': 12, 'supportdropoff': True}})
+        return httpx.Response(200, content=json.dumps(response).encode(), headers={'content-type': 'application/json'})
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    with pytest.raises(OperationUncertainError):
+        await sps.dropoff('00123456789')
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['timeout', 'empty', 'server', 'html'])
+async def test_dropoff_transport_or_nonconfirmation_is_uncertain_and_not_retried(failure):
+    writes = []
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': {'id': 12, 'supportdropoff': True}})
+        writes.append(request)
+        if failure == 'timeout':
+            raise httpx.ReadTimeout('test-only timeout', request=request)
+        if failure == 'server':
+            return httpx.Response(503)
+        if failure == 'html':
+            return httpx.Response(200, text='<html>Login</html>', headers={'content-type': 'text/html'})
+        return httpx.Response(204)
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    with pytest.raises(OperationUncertainError):
+        await sps.dropoff('00123456789')
+    assert len(writes) == 1
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('permission', [False, None, 'true', 1])
+async def test_customer_dropoff_permission_is_checked_before_any_write(permission):
+    def handler(request):
+        assert request.url.path.endswith('/login')
+        return httpx.Response(200, json={'parcelshop': {'id': 12, 'supportdropoff': permission}})
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    with pytest.raises(SPSError) as caught:
+        await sps.dropoff('00123456789')
+    assert not isinstance(caught.value, OperationUncertainError)
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', [200, 204])
+async def test_payment_refresh_checks_carrier_and_amount_comes_only_from_details(status):
+    paths = []
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': {'id': 12}})
+        assert request.method == 'GET'
+        if request.url.path.endswith('/shipment/refreshCod'):
+            assert dict(request.url.params) == {'trackNumber': '00123456789'}
+            return httpx.Response(status)
+        assert request.url.path.endswith('/getShipmentDetails')
+        assert dict(request.url.params) == {'smsKey': '000111', 'logInfo': 'false'}
+        return httpx.Response(200, json={'trackNumber': '00123456789', 'cod': 12.50})
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    assert await sps.refresh_cod('00123456789') is None
+    assert (await sps.lookup_pickup('000111'))['cod'] == 12.50
+    assert len(paths) == 3
+    await sps.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', [302, 403, 500])
+async def test_failed_payment_refresh_cannot_claim_zero_or_send_payment(status):
+    def handler(request):
+        if request.url.path.endswith('/login'):
+            return httpx.Response(200, json={'parcelshop': {'id': 12}})
+        assert request.method == 'GET' and request.url.path.endswith('/shipment/refreshCod')
+        return httpx.Response(status)
+    sps = SPSClient('test', 'test', httpx.MockTransport(handler))
+    with pytest.raises(SPSError):
+        await sps.refresh_cod('00123456789')
+    await sps.close()

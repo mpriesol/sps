@@ -1,6 +1,6 @@
 # SPS: príjem, police a výdaj balíkov
 
-Mobilná aplikácia pre výdajné miesto SPS. Prijíma zásielky, eviduje ich fyzické miesta, nájde balík podľa PIN-u zákazníka a rozlišuje **Výdaj zákazníkovi** od **Výdaja kuriérovi**. Kuriérovi možno odovzdať podania od zákazníkov aj expirované zásielky. Uložené heslo patrí konkrétnemu kuriérovi; výber vidíš a môžeš ho zmeniť pred potvrdením.
+Mobilná aplikácia pre výdajné miesto SPS. Štyri hlavné operácie sú v jednom riadku: **Príjem od kuriéra**, **Výdaj kuriérovi**, **Príjem od zákazníka** a **Výdaj zákazníkovi**. Police, vyhľadávanie a nastavenia sú v ponuke **Viac**. Aplikácia eviduje fyzické miesta balíkov, vyhľadáva podľa verifikačného kódu a pri zákazníckych podaniach čaká na skutočné potvrdenie SPS. Uložené heslo patrí konkrétnemu kuriérovi; výber vidíš a môžeš ho zmeniť pred potvrdením.
 
 **[Police, fotografie, výdaj, vratky a inventúra — návod →](docs/POLICE-A-VYDAJ.md)**
 
@@ -13,13 +13,15 @@ Mobilná aplikácia pre výdajné miesto SPS. Prijíma zásielky, eviduje ich fy
 5. Ak heslo chýba alebo prijatie zlyhá, zobrazí sa výber kuriéra a heslo. Po úspešnom prijatí sa zadané heslo automaticky uloží.
 6. Aplikácia prijme balíky postupne a zobrazí výsledok. Pri chybe sa zastaví; po oprave sa posielajú iba zostávajúce balíky. Ak sa stratí odpoveď SPS, výsledok sa označí ako neoverený a aplikácia ho neposiela naslepo znovu.
 
-Príjem má jeden spoločný zoznam zásielok bez mien odosielateľov a tlačidiel plus. Podsvietené karty sú vybrané na potvrdenie; prijaté, odosielané a neoverené operácie majú vlastný stav. Voľba **Ukladať do políc počas príjmu** je v **Nastaveniach** a platí aj pre ďalšie mobily prevádzky.
+Príjem má jeden spoločný zoznam zásielok bez mien odosielateľov a tlačidiel plus. Výber zachováva existujúce dlaždice a pozíciu stránky, aj keď sa obnovia údaje zo servera. Podsvietené karty sú vybrané na potvrdenie; prijaté, odosielané a neoverené operácie majú vlastný stav. Voľba **Ukladať do políc počas príjmu** je v **Viac → Nastavenia** a platí aj pre ďalšie mobily prevádzky.
 
-Kódy možno zadať aj ručne alebo načítať USB/Bluetooth čítačkou do vstupného poľa. Čísla s úvodnými nulami zostávajú nezmenené. Párovanie prechádza celý zoznam SPS, aj keď sa na obrazovke zobrazuje iba časť.
+Ručné zadávanie je predvolene vypnuté. Po zapnutí v **Viac → Nastavenia** sa zobrazí vstupný riadok použiteľný aj pre USB/Bluetooth čítačku. Čísla s úvodnými nulami zostávajú nezmenené. Párovanie prechádza celý zoznam SPS, aj keď sa na obrazovke zobrazuje iba časť.
+
+Pri **Výdaji zákazníkovi** zostáva zadaný verifikačný kód vo formulári. Príjemca a dobierka sú v jednej karte s umiestnením balíka. Nezaplatená dobierka kartu zvýrazní svetlooranžovo; hotovosť treba výslovne potvrdiť. Po platbe zákazníka mobilom tlačidlo **Obnoviť platbu zo SPS** načíta aktuálnu sumu. Potvrdená nula odstráni zvýraznenie a požiadavku na hotovosť, bez automatického výdaja. Skenovanie pri výdaji je samostatné nastavenie, predvolene vypnuté.
 
 ## Hlasové zadávanie po slovensky
 
-Tlačidlo **Hlasom** je dostupné pri príjme, ukladaní a inventúre, výdaji kuriérovi aj overovaní balíka pri výdaji zákazníkovi. Pri konečnom overení balíka pre zákazníka treba vysloviť celé číslo; krátky koniec nestačí. Ostatné režimy rozlišujú balíky podľa jednoznačného konca čísla v aktuálnom zozname.
+Tlačidlo **Hlasom** je dostupné pri príjme, ukladaní a inventúre, výdaji kuriérovi aj pri voliteľnom overovaní balíka pre zákazníka. Nové podanie od zákazníka aj zapnuté overenie výdaja vyžadujú celé číslo; krátky koniec nestačí. Ostatné režimy rozlišujú balíky podľa jednoznačného konca čísla medzi známymi balíkmi.
 
 Stlač **Hlasom**, povoľ mikrofón a povedz **posledné dva znaky kódu**, každý zvlášť. Mobil môže zostať položený na poličke: netreba držať tlačidlo ani po každom balíku klikať. Hlasový režim zostáva zapnutý pre ďalšie balíky; medzi kódmi urob krátku pauzu.
 
@@ -86,6 +88,8 @@ Zvuk zaznie pri každom rozpoznaní, aj pri opakovane držanom kóde (interval p
 
 Pri `SPS_DEMO=true` aplikácia vôbec nekomunikuje so SPS. Obsahuje desať balíkov `DEMO00000001` až `DEMO00000010` na príjem a dvoch kuriérov s heslom **demo**. Po prijatí prvého balíka ho vyhľadáš PIN-om `000001`. Vopred uložený `DEMOSTORED01` má PIN `111111` a dobierku 12,50 €. V časti **Výdaj kuriérovi** sú podania `DEMOOUTGOING01` a `DEMOOUTGOING02`, pod nimi vratka `DEMOEXPIRED01`. Balíky `DEMOBLOCKED01` a `DEMOOUTBLOCKED03` ukazujú stav, ktorý SPS nedovoľuje odovzdať bez vyriešenia. Na skúšku kamery vytlač [ukážkové čiarové kódy](docs/demo-barcodes.svg).
 
+PIN `222222` nájde `DEMOMOBILE01` s dobierkou 18,90 €. Iba v deme jeho výslovné obnovenie platby simuluje zaplatenie mobilom a zníži dobierku na nulu. Pre príjem podania od zákazníka použi nové číslo `DEMODROPOFF01`; po potvrdení sa objaví medzi podaniami kuriérovi. Skutočná prevádzka vždy používa odpoveď SPS a platbu nesimuluje.
+
 Miestna databáza a police prežijú aj reštart dema, skúšobný dopravca však začína znova. Na úplne čistý test použi nový samostatný `DATA_DIR`; nemaž dáta ostrej prevádzky.
 
 ## Rozsah
@@ -126,6 +130,6 @@ GitHub Actions spúšťa frontendové a backendové testy aj zostavenie Docker i
 
 ## SPS integrácia
 
-Adaptér používa rovnaké interné rozhranie ako portál SPS, overené pre príjem, skladované zásielky, PIN, výdaj, vratky a doklady v jeho JavaScripte 17. 11. 2026. Nejde o verejné integračné API s garantovanou stabilitou. Pozri [technické poznámky](docs/SPS-INTEGRACIA.md).
+Adaptér používa rovnaké interné rozhranie ako portál SPS, overené pre príjem od kuriéra aj zákazníka, skladované zásielky, PIN, výdaj, kontrolu dobierky, vratky a doklady v jeho JavaScripte 18. 11. 2026. Nejde o verejné integračné API s garantovanou stabilitou. Pozri [technické poznámky](docs/SPS-INTEGRACIA.md).
 
 Pred bežným používaním over na serveri prihlásenie, zoznam zásielok a jeden skutočný príjem s kuriérom. Funkčnosť na konkrétnom telefóne závisí aj od fotoaparátu a kvality etikety.

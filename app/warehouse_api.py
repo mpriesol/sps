@@ -36,6 +36,7 @@ class UpdateLocation(LocationId):
 class RegisterParcel(Body):
     number: str = Field(min_length=1, max_length=100)
     sender_name: str = Field(default="", max_length=500)
+    scanned: bool = False
 
 
 class MoveParcel(Body):
@@ -73,6 +74,8 @@ class SettingsBody(Body):
     photos: bool | None = None
     return_staging: bool | None = None
     receipt_place: bool | None = None
+    manual_entry: bool | None = None
+    pickup_scan_required: bool | None = None
 
 
 class Photo(Body):
@@ -115,7 +118,7 @@ def register_warehouse_routes(app, warehouse, session_for):
 
     @app.post("/api/parcels/register")
     async def register_parcel(request: Request, body: RegisterParcel):
-        return {"parcel": warehouse.register_parcel(body.number, body.sender_name, actor(request))}
+        return {"parcel": warehouse.register_parcel(body.number, body.sender_name, actor(request), scanned=body.scanned)}
 
     @app.post("/api/parcels/move")
     async def move_parcel(request: Request, body: MoveParcel):

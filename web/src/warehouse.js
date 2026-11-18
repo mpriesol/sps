@@ -1,11 +1,11 @@
 import JsBarcode from 'jsbarcode';
 import { normalizeCode, parcelCount, receiptComplete } from './domain.js';
-import { chooseCourier, draftKey, handoverEligible, handoverGroups, isTerminal, operationId, reconcilePickupAttempt, reconcileReceiptItem, restoreDraft, routeWarehouseScan, serializeDraft, suffix, suffixCollisions, warehouseVoiceContext } from './warehouse-domain.js';
+import { canConfirmPickup, chooseCourier, draftKey, handoverEligible, handoverGroups, isTerminal, operationId, parcelIntakeTime, reconcileDropoffAttempt, reconcilePickupAttempt, reconcileReceiptItem, restoreDraft, routeWarehouseScan, serializeDraft, suffix, suffixCollisions, validDropoffCode, warehouseVoiceContext } from './warehouse-domain.js';
 
 const $ = id => document.getElementById(id);
 const el = (tag, content = '', cls = '') => { const node = document.createElement(tag); node.textContent = content; node.className = cls; return node; };
 const button = (label, action, cls = 'secondary compact') => { const node = el('button', label, cls); node.type = 'button'; node.addEventListener('click', action); return node; };
-const statuses = { unconfirmed: 'Príjem do SPS nepotvrdený', accepted: 'Prijatý v SPS', accept_uncertain: 'Príjem treba overiť v SPS', delivery_uncertain: 'Výdaj treba overiť v SPS', return_uncertain: 'Vrátenie treba overiť v SPS', delivered: 'Vydaný zákazníkovi', returned: 'Odovzdaný kuriérovi' };
+const statuses = { unconfirmed: 'Príjem do SPS nepotvrdený', accepted: 'Prijatý v SPS', accept_uncertain: 'Príjem treba overiť v SPS', dropoff_uncertain: 'Príjem od zákazníka treba overiť v SPS', delivery_uncertain: 'Výdaj treba overiť v SPS', return_uncertain: 'Vrátenie treba overiť v SPS', delivered: 'Vydaný zákazníkovi', returned: 'Odovzdaný kuriérovi' };
 const PHOTO_MAX_EDGE = 640, PHOTO_MAX_BYTES = 40 * 1024;
 const PHOTO_QUALITIES = [.70, .58, .46];
 
@@ -13,7 +13,8 @@ export class WarehouseWorkspace {
   constructor({ api, feedback, beep, state, stopInput, renderReceipt, onVoiceContextChange = () => {} }) {
     Object.assign(this, { api, feedback, beep, state, stopInput, renderReceipt, onVoiceContextChange });
     this.view = 'receipt'; this.locations = []; this.parcels = []; this.settings = {}; this.activeNumber = null; this.activeLocation = null;
-    this.receiptNumber = null; this.batchLocation = null; this.busy = false; this.photoBusy = false; this.inventory = null; this.pickup = null;
+    this.receiptNumber = null; this.batchLocation = null; this.busy = false; this.photoBusy = false; this.inventory = null; this.pickup = null; this.pickupPin = '';
+    this.dropoff = null; this.dropoffAttempts = new Map();
     this.returns = []; this.returnScans = new Set(); this.returnCouriers = []; this.returnCourierId = ''; this.returnBusy = false; this.returnOperations = new Map(); this.returnCouriersLoading = false;
     this.account = ''; this.query = ''; this.printSelection = new Set(); this.bulkSource = ''; this.bulkTarget = ''; this.bulkSelected = new Set();
     this.viewLoading = false; this.refreshSequence = 0; this.viewGeneration = 0; this.returnsGeneration = 0; this.returnCourierSequence = 0;
@@ -22,8 +23,12 @@ export class WarehouseWorkspace {
 
   mount() {
     const leading = el('section'); leading.id = 'workspace-leading'; $('scanner-workspace').before(leading);
-    for (const [id, label] of [['receipt', 'Príjem'], ['store', 'Uložiť / nájsť'], ['pickup', 'Výdaj zákazníkovi'], ['returns', 'Výdaj kuriérovi'], ['locations', 'Miesta'], ['settings', 'Nastavenia']]) {
-      const item = button(label, () => this.open(id), 'nav-button'); item.dataset.view = id; item.id = `nav-${id}`; $('workspace-nav').append(item);
+    for (const [id, action, target] of [['receipt', 'Príjem', 'od kuriéra'], ['returns', 'Výdaj', 'kuriérovi'], ['dropoff', 'Príjem', 'od zákazníka'], ['pickup', 'Výdaj', 'zákazníkovi']]) {
+      const item = button('', () => this.open(id), 'nav-button'); item.dataset.view = id; item.id = `nav-${id}`;
+      item.setAttribute('aria-label', `${action} ${target}`); item.append(el('span', action, 'nav-main'), el('span', target, 'nav-detail')); $('workspace-nav').append(item);
+    }
+    for (const [id, label] of [['store', 'Uložiť / nájsť'], ['locations', 'Miesta'], ['settings', 'Nastavenia']]) {
+      const item = button(label, () => this.open(id), 'nav-button'); item.dataset.view = id; item.id = `nav-${id}`; $('tools-menu').append(item);
     }
     const dialog = el('dialog'); dialog.id = 'warehouse-dialog'; document.body.append(dialog);
     const confirmAction = el('dialog'); confirmAction.id = 'confirm-action-dialog'; document.body.append(confirmAction);
@@ -91,7 +96,7 @@ export class WarehouseWorkspace {
   reset() {
     this.viewGeneration++;
     this.returnCourierSequence++; this.returnCouriersLoading = false; this.returnOperations.clear();
-    this.stopInput(); this.pickup = null; this.activeNumber = null; this.receiptNumber = null; this.returnScans.clear(); this.photoBusy = false;
+    this.stopInput(); this.pickup = null; this.pickupPin = ''; this.lastPickupReceipt = null; this.dropoff = null; this.dropoffAttempts.clear(); this.activeNumber = null; this.receiptNumber = null; this.returnScans.clear(); this.photoBusy = false;
     $('photo-dialog').close(); $('warehouse-dialog').close(); $('confirm-action-dialog').close(); this.view = 'receipt'; this.setNav();
   }
 
@@ -120,6 +125,10 @@ export class WarehouseWorkspace {
         this.notice('Požiadavka v evidencii servera nie je potvrdená; môžeš zopakovať kontrolovaný pokus.', 'warning');
       }
     }
+    for (const [number, attempt] of this.dropoffAttempts) {
+      Object.assign(attempt, reconcileDropoffAttempt(attempt, this.parcel(number)));
+      if (this.dropoff?.number === number) this.dropoff = attempt;
+    }
     this.render(); this.renderReceiptActive(); this.renderReceipt(); return data;
   }
 
@@ -130,10 +139,16 @@ export class WarehouseWorkspace {
   }
 
   parcel(number) { return this.parcels.find(p => p.number === normalizeCode(number)); }
+  rememberParcel(parcel) {
+    if (!parcel?.number) return;
+    const index = this.parcels.findIndex(item => item.number === parcel.number);
+    if (index === -1) this.parcels.push(parcel); else this.parcels[index] = parcel;
+  }
   location(id) { return this.locations.find(p => p.id === id); }
   locationName(id) { return this.location(id)?.name || 'Bez miesta'; }
   activeParcels() { return this.parcels.filter(p => !isTerminal(p)); }
   receiptPlacementEnabled() { return this.settings.receipt_place === true; }
+  pickupScanRequired() { return this.settings.pickup_scan_required === true; }
   voiceContext() { return warehouseVoiceContext(this); }
   notice(message, kind = '') { $('workspace-status').textContent = message; $('workspace-status').className = `workspace-status ${kind}`; }
 
@@ -141,8 +156,9 @@ export class WarehouseWorkspace {
     if (this.state.preparing || this.state.receiving || this.returnBusy || this.busy || this.viewLoading) return;
     if (view !== this.view) this.notice('');
     this.viewLoading = true; this.stopInput(); this.viewGeneration++; this.view = view; this.activeNumber = null; this.activeLocation = null; this.batchLocation = null; this.inventory = null;
+    $('tools-menu').hidden = true; $('more-tools').setAttribute('aria-expanded', 'false');
     this.setNav(); this.render();
-    this.feedback(view === 'store' ? 'Naskenuj balík alebo čiarový kód miesta.' : view === 'pickup' ? 'Najprv zadaj kód od zákazníka.' : view === 'returns' ? 'Vyber ťuknutím, skenom alebo hlasom balíky na odovzdanie kuriérovi.' : 'Pripravené na skenovanie.');
+    this.feedback(view === 'store' ? 'Naskenuj balík alebo čiarový kód miesta.' : view === 'pickup' ? 'Zadaj verifikačný kód.' : view === 'dropoff' ? 'Naskenuj celé číslo balíka od zákazníka.' : view === 'returns' ? 'Vyber ťuknutím, skenom alebo hlasom balíky na odovzdanie kuriérovi.' : 'Pripravené na skenovanie.');
     try { await this.refresh(); if (view === 'returns') await this.loadReturns(); }
     catch (error) { this.notice(error.message, 'error'); }
     finally { this.viewLoading = false; this.render(); this.renderReceipt(); }
@@ -150,9 +166,10 @@ export class WarehouseWorkspace {
 
   setNav() {
     $('work-view').dataset.view = this.view;
-    for (const node of $('workspace-nav').children) { const active = node.dataset.view === this.view; node.classList.toggle('active', active); node.setAttribute('aria-current', active ? 'page' : 'false'); }
+    for (const node of document.querySelectorAll('#workspace-nav [data-view], #tools-menu [data-view]')) { const active = node.dataset.view === this.view; node.classList.toggle('active', active); node.setAttribute('aria-current', active ? 'page' : 'false'); }
     $('receipt-area').hidden = this.view !== 'receipt' || this.viewLoading; $('warehouse-panel').hidden = this.view === 'receipt' && !this.viewLoading;
-    $('scanner-workspace').hidden = this.viewLoading || ['locations', 'settings'].includes(this.view) || (this.view === 'pickup' && !this.pickup);
+    $('scanner-workspace').hidden = this.viewLoading || ['locations', 'settings'].includes(this.view) || (this.view === 'pickup' && (!this.pickup || !this.pickupScanRequired()));
+    $('manual-form').hidden = this.settings.manual_entry !== true || $('scanner-workspace').hidden;
     $('workspace-leading').hidden = this.view !== 'pickup';
     $('demo-add').hidden = !this.state.demo || this.view !== 'receipt';
     $('manual-code').placeholder = this.view === 'receipt' ? 'Číslo balíka alebo kód miesta' : 'Naskenuj alebo zadaj celý kód';
@@ -160,12 +177,12 @@ export class WarehouseWorkspace {
     this.onVoiceContextChange();
   }
 
-  async onReceiptParcel(number) {
+  async onReceiptParcel(number, scanned = false) {
     const previous = this.receiptNumber;
     const known = this.state.shipments.get(normalizeCode(number));
-    await this.api('parcels/register', { number, sender_name: known?.senderName || '' });
+    await this.api('parcels/register', { number, sender_name: known?.senderName || '', scanned });
     await this.refresh();
-    if (this.receiptPlacementEnabled() && previous && previous !== number && !this.parcel(previous)?.location_id) this.notice(`Predošlý balík ${suffix(previous)} (${previous}) zostal bez miesta. Môžeš ho uložiť neskôr cez Uložiť / nájsť.`, 'warning');
+    if (this.receiptPlacementEnabled() && previous && previous !== number && !this.parcel(previous)?.location_id) this.feedback(`Predošlý balík ${suffix(previous)} (${previous}) zostal bez miesta. Môžeš ho uložiť neskôr cez Uložiť / nájsť.`, 'warning');
     this.receiptNumber = number; this.renderReceiptActive(); this.saveDraft();
   }
 
@@ -182,6 +199,7 @@ export class WarehouseWorkspace {
     }
     if (this.view === 'pickup') { this.verifyPickup(code); return true; }
     if (this.view === 'returns') { await this.scanReturn(code); return true; }
+    if (this.view === 'dropoff') { this.scanDropoff(code); return true; }
     if (this.view !== 'store') return true;
     const route = routeWarehouseScan(code, this.locations, this.activeNumber);
     if (route.kind === 'unknown-location') { this.feedback('Neznámy kód miesta. Obnov zoznam.', 'error'); return true; }
@@ -206,7 +224,7 @@ export class WarehouseWorkspace {
       this.stopInput();
       const confirmed = await this.ask('Balík zatiaľ nie je v evidencii', `${code}\nVytvoriť interný záznam a uložiť ho? Týmto sa nepotvrdí príjem do SPS.`, 'Vytvoriť záznam');
       if (!confirmed) return true;
-      try { const result = await this.api('parcels/register', { number: code }); parcel = result.parcel; await this.refresh(); }
+      try { const result = await this.api('parcels/register', { number: code, scanned: true }); parcel = result.parcel; await this.refresh(); }
       catch (error) { this.feedback(error.message, 'error'); return true; }
     }
     if (isTerminal(parcel)) { this.feedback(`${code}: ${statuses[parcel.carrier_status]}. Miesto sa nezmenilo.`, 'error'); return true; }
@@ -237,14 +255,14 @@ export class WarehouseWorkspace {
     this.feedback(`${location.name} · ${parcelCount(this.activeParcels().filter(p => p.location_id === location.id).length)}`, 'success');
   }
 
-  parcelCard(parcel, { detailed = false, actions = true } = {}) {
+  parcelCard(parcel, { detailed = false, actions = true, showExpiry = true } = {}) {
     const card = el('article', '', `parcel-card ${isTerminal(parcel) ? 'terminal' : ''}`);
     const heading = el('div', '', 'parcel-card-heading'), tail = el('strong', suffix(parcel.number), 'parcel-suffix');
     const info = el('div', '', 'parcel-card-info'); info.append(el('strong', this.locationName(parcel.location_id), 'location-title'), el('span', parcel.number, 'mono'), el('span', parcel.sender_name || '', 'muted'));
     heading.append(tail, info); card.append(heading);
     const status = el('p', statuses[parcel.carrier_status] || parcel.carrier_status, `status-label ${parcel.carrier_status !== 'accepted' ? 'attention' : ''}`); card.append(status);
     if (parcel.pending_operation) card.append(el('p', parcel.pending_operation.outcome === 'pending' ? 'Operácia prebieha alebo čaká na overenie v SPS.' : 'Výsledok operácie nie je známy. Najprv ho over v SPS.', 'warning-note'));
-    if (parcel.expires_at) card.append(el('p', `SPS: do ${this.formatTime(parcel.expires_at)}${parcel.expiry_synced_at ? ` · overené ${this.formatTime(parcel.expiry_synced_at)}` : ''}`, 'muted'));
+    if (showExpiry && parcel.expires_at) card.append(el('p', `SPS: do ${this.formatTime(parcel.expires_at)}${parcel.expiry_synced_at ? ` · overené ${this.formatTime(parcel.expiry_synced_at)}` : ''}`, 'muted'));
     if (suffixCollisions(this.activeParcels().filter(p => p.location_id === parcel.location_id), parcel.number).length) card.append(el('p', 'Na tomto mieste je viac balíkov s rovnakou koncovkou. Over celý kód.', 'warning-note'));
     if (parcel.photo_url && detailed) { const image = el('img', '', 'parcel-photo'); image.src = parcel.photo_url; image.alt = `Balík ${parcel.number}`; card.append(image); }
     if (actions) {
@@ -281,6 +299,7 @@ export class WarehouseWorkspace {
     if (this.view === 'settings') this.renderSettings(panel);
     if (this.view === 'pickup') this.renderPickup(panel);
     if (this.view === 'returns') this.renderReturns(panel);
+    if (this.view === 'dropoff') this.renderDropoff(panel);
   }
 
   renderStore(panel) {
@@ -418,10 +437,10 @@ export class WarehouseWorkspace {
 
   renderSettings(panel) {
     const card = el('section', '', 'card panel-heading'); card.append(el('h2', 'Nastavenia výdajného miesta'), el('p', 'Tieto voľby platia pre všetky prihlásené zariadenia.', 'muted'));
-    for (const [key, title, help] of [ ['receipt_place', 'Ukladať na miesta počas príjmu', 'Po balíku naskenuj miesto. Vypnuté: balíky uložíš neskôr cez Uložiť / nájsť.'], ['courier_warning', 'Upozorniť, keď kuriér nie je prvý v SPS', 'Použije sa posledný úspešne použitý kuriér. Upozornenie príjem neblokuje.'], ['photos', 'Fotografie balíkov', 'Voliteľná fotka po načítaní. Fotku môžeš preskočiť alebo doplniť neskôr.'], ['return_staging', 'Príprava odovzdania kuriérovi vopred', 'Pridá označenie pripravených balíkov. Priame odovzdanie kuriérovi zostáva dostupné.'] ]) {
+    for (const [key, title, help] of [ ['manual_entry', 'Ručné zadávanie čísla balíka', 'Zobrazí pole na napísanie celého čísla pod skenerom.'], ['pickup_scan_required', 'Overiť balík skenom pri výdaji zákazníkovi', 'Po verifikačnom kóde vyžaduje aj celý kód balíka. Vypnuté: výdaj potvrdíš priamo na karte.'], ['receipt_place', 'Ukladať na miesta počas príjmu', 'Po balíku naskenuj miesto. Vypnuté: balíky uložíš neskôr cez Uložiť / nájsť.'], ['courier_warning', 'Upozorniť, keď kuriér nie je prvý v SPS', 'Použije sa posledný úspešne použitý kuriér. Upozornenie príjem neblokuje.'], ['photos', 'Fotografie balíkov', 'Voliteľná fotka po načítaní. Fotku môžeš preskočiť alebo doplniť neskôr.'], ['return_staging', 'Príprava odovzdania kuriérovi vopred', 'Pridá označenie pripravených balíkov. Priame odovzdanie kuriérovi zostáva dostupné.'] ]) {
       const label = el('label', '', 'settings-option'); const input = el('input'); input.type = 'checkbox'; input.checked = !!this.settings[key]; input.id = `setting-${key}`;
       const text = el('div'); text.append(el('strong', title), el('p', help, 'muted')); label.append(input, text);
-      input.addEventListener('change', async () => { input.disabled = true; try { const response = await this.api('settings', { [key]: input.checked }); this.settings = response.settings; this.notice('Nastavenie uložené.', 'success'); this.renderReceiptActive(); this.renderReceipt(); this.onVoiceContextChange(); } catch (error) { input.checked = !input.checked; this.notice(error.message, 'error'); } finally { input.disabled = false; } }); card.append(label);
+      input.addEventListener('change', async () => { input.disabled = true; try { const response = await this.api('settings', { [key]: input.checked }); this.settings = response.settings; this.notice('Nastavenie uložené.', 'success'); this.setNav(); this.renderReceiptActive(); this.renderReceipt(); this.onVoiceContextChange(); } catch (error) { input.checked = !input.checked; this.notice(error.message, 'error'); } finally { input.disabled = false; } }); card.append(label);
     }
     card.append(el('p', 'Rozpracovaná prijímacia dávka sa ukladá v tomto prehliadači. Heslá ani zákaznícke PIN kódy sa do nej neukladajú.', 'footnote')); panel.append(card);
   }
@@ -479,7 +498,7 @@ export class WarehouseWorkspace {
     try {
       const result = await this.api(`history?number=${encodeURIComponent(number)}`); const content = el('div');
       for (const event of result.events) {
-        const row = el('div', '', 'history-row'); const names = { registered: 'Záznam balíka', move: 'Zmena miesta', bulk_move: 'Hromadný presun', undo: 'Vrátenie presunu', photo: 'Fotografia', staged: 'Vratka pripravená', unstaged: 'Zrušená príprava vratky', carrier_sync: 'Obnovené údaje zo SPS', carrier_accepted: 'Príjem potvrdený v SPS', carrier_accept_uncertain: 'Nejasný výsledok príjmu', carrier_delivered: 'Vydané zákazníkovi', carrier_returned: 'Odovzdané kuriérovi', carrier_delivery_uncertain: 'Nejasný výsledok výdaja', carrier_return_uncertain: 'Nejasný výsledok vrátenia', carrier_verified: 'Výsledok overený obsluhou' };
+        const row = el('div', '', 'history-row'); const names = { registered: 'Záznam balíka', scanned: 'Načítaný kód balíka', move: 'Zmena miesta', bulk_move: 'Hromadný presun', undo: 'Vrátenie presunu', photo: 'Fotografia', staged: 'Vratka pripravená', unstaged: 'Zrušená príprava vratky', carrier_sync: 'Obnovené údaje zo SPS', carrier_accepted: 'Príjem potvrdený v SPS', carrier_intake_confirmed: 'Príjem potvrdený v SPS', carrier_accept_uncertain: 'Nejasný výsledok príjmu', carrier_dropoff_uncertain: 'Nejasný výsledok príjmu od zákazníka', carrier_delivered: 'Vydané zákazníkovi', carrier_returned: 'Odovzdané kuriérovi', carrier_delivery_uncertain: 'Nejasný výsledok výdaja', carrier_return_uncertain: 'Nejasný výsledok vrátenia', carrier_verified: 'Výsledok overený obsluhou' };
         row.append(el('strong', names[event.type] || 'Zmena evidencie'), el('p', `${this.formatTime(event.created_at)} · ${event.actor || 'Obsluha'}`, 'muted'));
         if (event.from_location_id || event.to_location_id) row.append(el('p', `${this.location(event.from_location_id)?.name || event.details?.from_location_name || 'Bez miesta'} → ${this.location(event.to_location_id)?.name || event.details?.to_location_name || 'Bez miesta'}`));
         const current = this.parcel(number);
@@ -492,7 +511,7 @@ export class WarehouseWorkspace {
 
   resolveOperation(parcel) {
     this.stopInput();
-    const kind = parcel.pending_operation?.kind || ({ accept_uncertain: 'accept', delivery_uncertain: 'deliver', return_uncertain: 'return' })[parcel.carrier_status];
+    const kind = parcel.pending_operation?.kind || ({ accept_uncertain: 'accept', dropoff_uncertain: 'dropoff', delivery_uncertain: 'deliver', return_uncertain: 'return' })[parcel.carrier_status];
     if (!kind) return;
     const form = el('form'), link = el('a', 'Otvoriť portál SPS'); link.href = 'https://ps.sps-sro.sk'; link.target = '_blank'; link.rel = 'noopener noreferrer';
     const info = el('p', `Balík ${parcel.number}. Najprv skontroluj jeho výsledný stav v portáli SPS. Samotné zatvorenie okna, chyba siete alebo neprítomnosť v zozname výsledok nepotvrdzujú.`, 'confirmation-copy');
@@ -511,19 +530,24 @@ export class WarehouseWorkspace {
         if (kind === 'accept' && receipt) { receipt.state = result.value === 'confirmed' ? 'accepted' : 'pending'; receipt.message = 'Stav overený v SPS'; receipt.operationId = null; this.state.finished = receiptComplete(this.state.selected); }
         if (kind === 'return') this.returnScans.delete(parcel.number);
         if (kind === 'deliver') this.pickup = null;
+        if (kind === 'dropoff') {
+          const attempt = { ...(this.dropoffAttempts.get(parcel.number) || { number: parcel.number }), state: result.value === 'confirmed' ? 'accepted' : 'ready', operationId: null, message: 'Stav overený v SPS', controlledRetry: false };
+          this.dropoffAttempts.set(parcel.number, attempt); if (this.dropoff?.number === parcel.number) this.dropoff = attempt;
+        }
         $('warehouse-dialog').close(); await this.refresh(); this.renderReceipt(); this.notice('Overený výsledok je uložený.', 'success');
       } catch (err) { error.textContent = err.message; valid(); }
     }); this.showDialog('Overenie nejasného výsledku', form);
   }
 
   renderPickup(panel) {
-    const card = el('section', '', 'card panel-heading'); card.append(el('h2', 'Výdaj zákazníkovi'), el('p', 'Kód zákazníka vyhľadá balík. Výdaj potvrdíš až po načítaní celého kódu nájdeného balíka.', 'muted'));
-    const form = el('form', '', 'manual-form'); form.id = 'pickup-form'; const input = el('input'); input.id = 'pickup-pin'; input.placeholder = 'Kód od zákazníka'; input.autocomplete = 'off'; input.maxLength = 100; input.required = true; input.setAttribute('aria-label', 'Kód od zákazníka'); const submit = el('button', 'Nájsť', 'primary'); submit.type = 'submit'; form.append(input, submit);
-    form.addEventListener('submit', async event => {
-      event.preventDefault(); submit.disabled = true; this.stopInput(); this.pickup = null; this.lastPickupReceipt = null; panel.replaceChildren(); this.setNav();
-      try { const result = await this.api('pickup/lookup', { pin: input.value.trim() }); input.value = ''; this.pickup = { ...result, verified: false, codConfirmed: false, paidWithTerminal: false }; await this.refresh(); this.feedback('Vyber balík z uvedeného miesta a naskenuj jeho celý kód.'); }
-      catch (error) { this.notice(error.message, 'error'); submit.disabled = false; }
-    }); card.append(form); $('workspace-leading').append(card);
+    const form = el('form', '', 'manual-form pickup-search'); form.id = 'pickup-form';
+    const input = el('input'); input.id = 'pickup-pin'; input.placeholder = 'Verifikačný kód'; input.autocomplete = 'off'; input.maxLength = 100; input.required = true; input.value = this.pickupPin; input.disabled = this.busy; input.setAttribute('aria-label', 'Verifikačný kód');
+    const submit = el('button', 'Nájsť', 'primary'); submit.type = 'submit'; submit.disabled = this.busy; form.append(input, submit);
+    input.addEventListener('input', () => {
+      this.pickupPin = input.value;
+      if (this.pickup || this.lastPickupReceipt) { this.pickup = null; this.lastPickupReceipt = null; panel.replaceChildren(); this.setNav(); this.renderReceipt(); }
+    });
+    form.addEventListener('submit', event => { event.preventDefault(); this.lookupPickup(input.value); }); $('workspace-leading').append(form);
     if (this.lastPickupReceipt) {
       const receipt = el('section', '', 'card panel-heading'); receipt.append(el('h3', `Výdaj ${this.lastPickupReceipt.number} je potvrdený`));
       if (this.lastPickupReceipt.receipt_url) { const link = el('a', 'Otvoriť / vytlačiť doklad', 'primary'); link.href = this.lastPickupReceipt.receipt_url; link.target = '_blank'; link.rel = 'noopener'; const row = el('div', '', 'receipt-result-actions'); row.append(link); receipt.append(row); }
@@ -533,54 +557,166 @@ export class WarehouseWorkspace {
     if (!this.pickup) { if (this.state.demo) panel.append(el('p', 'Demo: PIN 111111 nájde DEMOSTORED01. Po príjme DEMO00000001 funguje PIN 000001.', 'footnote')); return; }
     const remote = this.pickup.parcel, local = this.parcel(remote.trackNumber) || this.pickup.local || { number: remote.trackNumber, sender_name: remote.senderName || '', carrier_status: 'accepted', location_id: null };
     if (local.pending_operation?.kind === 'deliver' || local.carrier_status === 'delivery_uncertain') this.pickup.uncertain = true;
-    panel.append(this.parcelCard(local, { detailed: true }));
-    if (remote.recipientName) panel.append(el('p', remote.recipientName, 'recipient-name'));
-    if (remote.psRemark) panel.append(el('p', remote.psRemark, 'warning-note'));
     const cod = Number(remote.cod || 0);
-    const confirm = el('div', '', 'card pickup-confirm'); confirm.append(el('p', this.pickup.verified ? `✓ Správny balík ${suffix(remote.trackNumber)} je overený.` : 'Naskenuj celý čiarový kód tohto balíka.', this.pickup.verified ? 'verified-note' : 'step-prompt'));
+    const card = this.parcelCard(local, { detailed: true, actions: false, showExpiry: false }); card.id = 'pickup-parcel'; card.classList.add('pickup-card'); card.classList.toggle('has-cod', cod > 0);
+    const intake = parcelIntakeTime(local);
+    card.append(el('p', intake ? `${intake.label}: ${this.formatTime(intake.value)}` : 'Čas prijatia nie je evidovaný.', 'muted pickup-time'));
+    if (remote.recipientName) card.append(el('p', remote.recipientName, 'pickup-recipient'));
+    card.append(el('strong', `Dobierka: ${cod.toFixed(2).replace('.', ',')} €`, 'pickup-cod'));
+    if (remote.psRemark) card.append(el('p', remote.psRemark, 'warning-note'));
     if (cod > 0) {
-      confirm.append(el('strong', `Dobierka: ${cod.toFixed(2)} €`, 'cod-amount'));
-      const label = el('label', '', 'check-label'), check = el('input'); check.type = 'checkbox'; check.id = 'pickup-cod-confirmed'; check.checked = this.pickup.codConfirmed;
-      label.append(check, el('span', 'Dobierka bola uhradená')); const payment = el('select'); payment.id = 'pickup-payment'; payment.setAttribute('aria-label', 'Spôsob úhrady dobierky'); payment.append(new Option('Hotovosť', 'cash')); if (remote.paymentTerminalAllowed) payment.append(new Option('Uhradené na platobnom termináli', 'terminal')); payment.value = this.pickup.paidWithTerminal && remote.paymentTerminalAllowed ? 'terminal' : 'cash';
-      check.addEventListener('change', () => { this.pickup.codConfirmed = check.checked; this.render(); }); payment.addEventListener('change', () => { this.pickup.paidWithTerminal = payment.value === 'terminal'; }); confirm.append(label, payment);
-      if (remote.paymentTerminalAllowed) confirm.append(el('p', 'Voľba terminálu platbu nespustí. Potvrď ju až po úspešnej úhrade.', 'footnote'));
+      const label = el('label', '', 'check-label check-row'), check = el('input'); check.type = 'checkbox'; check.id = 'pickup-cod-confirmed'; check.checked = this.pickup.codConfirmed; check.disabled = this.busy || !!this.pickup.uncertain || !!this.pickup.detailsStale;
+      label.append(check, el('span', 'Hotovosť prijatá')); check.addEventListener('change', () => { this.pickup.codConfirmed = check.checked; this.render(); }); card.append(label);
     }
+    const refresh = button(this.pickup.refreshing ? 'Obnovujem platbu…' : 'Obnoviť platbu zo SPS', () => this.refreshPickup(), 'secondary pickup-refresh'); refresh.id = 'pickup-refresh'; refresh.disabled = this.busy || !!this.pickup.uncertain; card.append(refresh);
+    if (this.pickup.detailsStale) card.append(el('p', this.pickup.refreshError || 'Pred potvrdením obnov údaje zo SPS.', 'error-text pickup-error'));
+    const actions = el('div', '', 'inline-actions'); actions.append(button('História', () => this.history(local.number)));
+    if (local.pending_operation || local.carrier_status?.endsWith('_uncertain')) actions.append(button('Overiť výsledok v SPS', () => this.resolveOperation(local)));
+    if (this.settings.photos && !isTerminal(local)) actions.append(button(local.photo_url ? 'Nová fotka' : 'Odfotiť', () => this.openPhoto(local.number)));
+    card.append(actions);
+    const confirm = el('div', '', 'pickup-confirm');
+    if (this.pickupScanRequired()) confirm.append(el('p', this.pickup.verified ? `✓ Správny balík ${suffix(remote.trackNumber)} je overený.` : 'Naskenuj celý čiarový kód tohto balíka.', this.pickup.verified ? 'verified-note' : 'step-prompt'));
     if (this.pickup.uncertain) confirm.append(button('Overiť stav v evidencii', async () => {
       try { await this.refresh(); if (this.pickup?.uncertain) this.notice('Výsledok stále čaká na overenie. Skontroluj operáciu v portáli SPS.', 'warning'); }
       catch (error) { this.notice(`Evidenciu sa nepodarilo načítať. Výdaj zatiaľ neopakuj. ${error.message}`, 'error'); }
     }));
-    const release = button(this.pickup.uncertain ? 'Výsledok treba overiť v SPS' : this.pickup.controlledRetry ? 'Zopakovať kontrolovaný pokus' : 'Potvrdiť odovzdanie zákazníkovi', () => this.confirmPickup(), 'primary full'); release.id = 'pickup-confirm'; release.disabled = !this.pickup.verified || (cod > 0 && !this.pickup.codConfirmed) || !!this.pickup.uncertain || this.busy;
-    confirm.append(release); panel.append(confirm);
+    const release = button(this.pickup.uncertain ? 'Výsledok treba overiť v SPS' : this.pickup.controlledRetry ? 'Zopakovať kontrolovaný pokus' : 'Potvrdiť odovzdanie zákazníkovi', () => this.confirmPickup(), 'primary full'); release.id = 'pickup-confirm'; release.disabled = !canConfirmPickup(this.pickup, this.pickupScanRequired()) || this.busy || !!local.pending_operation || isTerminal(local);
+    confirm.append(release); card.append(confirm); panel.append(card);
+  }
+
+  async lookupPickup(value) {
+    if (this.busy || !value.trim()) return;
+    this.pickupPin = value; this.stopInput(); this.pickup = null; this.lastPickupReceipt = null; this.busy = true; this.notice(''); this.render(); this.renderReceipt();
+    const generation = this.viewGeneration;
+    try {
+      const result = await this.api('pickup/lookup', { pin: value.trim() });
+      if (generation !== this.viewGeneration) return;
+      this.rememberParcel(result.local);
+      if (typeof result.scan_required === 'boolean') this.settings.pickup_scan_required = result.scan_required;
+      this.pickup = { ...result, verified: false, codConfirmed: false, detailsStale: false };
+      if (this.pickupScanRequired()) this.feedback('Vyber balík z uvedeného miesta a naskenuj jeho celý kód.');
+    } catch (error) { if (generation === this.viewGeneration) this.notice(error.message, 'error'); }
+    finally { this.busy = false; this.render(); this.renderReceipt(); }
+  }
+
+  async refreshPickup() {
+    const attempt = this.pickup;
+    if (!attempt || attempt.uncertain || this.busy) return;
+    this.stopInput(); this.busy = true; attempt.refreshing = true; this.render(); this.renderReceipt();
+    try {
+      const result = await this.api('pickup/refresh', { lookup_id: attempt.lookup_id });
+      if (this.pickup !== attempt) return;
+      this.rememberParcel(result.local);
+      if (typeof result.scan_required === 'boolean') this.settings.pickup_scan_required = result.scan_required;
+      this.pickup = { ...attempt, ...result, verified: normalizeCode(result.parcel.trackNumber) === normalizeCode(attempt.parcel.trackNumber) && attempt.verified,
+        codConfirmed: false, refreshing: false, detailsStale: false, refreshError: null };
+      this.notice(result.amount_changed ? 'Dobierka bola aktualizovaná podľa SPS.' : 'Platba je overená v SPS.', 'success');
+    } catch (error) {
+      if (this.pickup === attempt) { attempt.detailsStale = true; attempt.codConfirmed = false; attempt.refreshError = `Platbu sa nepodarilo obnoviť. Skús obnovu znova. ${error.message}`; }
+    } finally { attempt.refreshing = false; this.busy = false; this.render(); this.renderReceipt(); }
   }
 
   verifyPickup(code) {
+    if (!this.pickupScanRequired()) return;
     if (!this.pickup || this.pickup.uncertain) { this.feedback(this.pickup?.uncertain ? 'Najprv over výsledok predchádzajúceho výdaja.' : 'Najprv vyhľadaj balík kódom zákazníka.', 'warning'); return; }
     if (normalizeCode(this.pickup.parcel.trackNumber) !== code) { this.pickup.verified = false; this.render(); this.beep('unknown'); this.feedback('Toto nie je balík pre vyhľadaného zákazníka. Výdaj sa nepotvrdil.', 'error'); return; }
     this.pickup.verified = true; this.beep('match'); this.feedback('✓ Správny balík. Teraz potvrď fyzické odovzdanie zákazníkovi.', 'success'); this.render();
   }
 
   async confirmPickup() {
-    if (!this.pickup?.verified || this.pickup.uncertain || this.busy) return;
+    if (!canConfirmPickup(this.pickup, this.pickupScanRequired()) || this.busy) return;
+    const local = this.parcel(this.pickup.parcel.trackNumber);
+    if (local?.pending_operation || isTerminal(local)) return;
     this.stopInput(); this.busy = true; this.render(); this.renderReceipt();
     let confirmed = null;
     try {
-      const result = await this.api('pickup/confirm', { lookup_id: this.pickup.lookup_id, scanned_number: this.pickup.parcel.trackNumber, cod_confirmed: this.pickup.codConfirmed && !this.pickup.paidWithTerminal, paid_with_terminal: this.pickup.codConfirmed && this.pickup.paidWithTerminal, operation_id: this.pickup.operationId ||= operationId() });
+      const result = await this.api('pickup/confirm', { lookup_id: this.pickup.lookup_id, ...(this.pickupScanRequired() ? { scanned_number: this.pickup.parcel.trackNumber } : {}), cod_confirmed: Number(this.pickup.parcel.cod || 0) > 0 && this.pickup.codConfirmed === true, paid_with_terminal: false, operation_id: this.pickup.operationId ||= operationId() });
       if (result.delivered !== true) { const error = new Error('Server nepotvrdil výsledok výdaja. Najprv ho over v SPS.'); error.outcome = 'uncertain'; throw error; }
       confirmed = result; this.pickup = null; this.lastPickupReceipt = result; await this.refresh(); this.feedback(`✓ ${result.number}: výdaj potvrdený v SPS.`, 'success'); this.notice(result.local_saved === false ? 'SPS výdaj potvrdilo. Lokálnu evidenciu treba obnoviť; výdaj neopakuj.' : 'Balík je vydaný zákazníkovi. Miesto bolo uvoľnené.', 'success');
     } catch (error) {
       if (confirmed) this.notice(`SPS výdaj ${confirmed.number} potvrdilo. Evidenciu sa nepodarilo obnoviť; výdaj neopakuj. ${error.message}`, 'warning');
       else {
-        if (this.pickup && (error.outcome === 'uncertain' || error.name === 'TypeError')) {
+        if (this.pickup && (error.outcome === 'uncertain' || error.name === 'TypeError' || error.status >= 500)) {
           this.pickup.uncertain = true;
           try { await this.refresh(); if (this.pickup?.uncertain) this.notice('Výsledok výdaja nie je známy. Najprv ho over v SPS.', 'warning'); }
           catch { this.notice('Spojenie sa prerušilo a stav sa nepodarilo overiť. Výdaj zatiaľ neopakuj; obnov evidenciu po návrate spojenia.', 'error'); }
         } else {
-          if (this.pickup) { this.pickup.operationId = null; this.pickup.controlledRetry = false; }
+          if (this.pickup) { this.pickup.operationId = null; this.pickup.controlledRetry = false; this.pickup.detailsStale = true; this.pickup.codConfirmed = false; this.pickup.refreshError = `Pred ďalším potvrdením obnov údaje zo SPS. ${error.message}`; }
           this.notice(error.message, 'error');
         }
       }
     }
     finally { this.busy = false; this.render(); this.renderReceipt(); }
+  }
+
+  scanDropoff(code) {
+    if (!validDropoffCode(code)) { this.dropoff = null; this.render(); this.beep('unknown'); this.feedback('Na príjem od zákazníka načítaj celé číslo balíka, nie koncovku ani kód police.', 'error'); return; }
+    const local = this.parcel(code);
+    let attempt = this.dropoffAttempts.get(code) || { number: code, state: 'ready', operationId: null, message: '' };
+    // Opening a cached record does not prove a failed request was never sent.
+    // Only refresh() may offer a controlled retry from a new server snapshot.
+    if (local?.dropoff_confirmed || local?.carrier_status === 'accepted' || local?.pending_operation || local?.carrier_status?.endsWith('_uncertain')) attempt = reconcileDropoffAttempt(attempt, local);
+    if (isTerminal(local) && !local.dropoff_confirmed) attempt = { ...attempt, state: 'blocked', message: `${statuses[local.carrier_status]}. Tento balík nemožno znovu prijať.` };
+    this.dropoff = { ...attempt, local: local || attempt.local }; this.dropoffAttempts.set(code, this.dropoff);
+    this.beep(this.dropoff.state === 'accepted' ? 'duplicate' : 'match'); this.render();
+    this.feedback(this.dropoff.state === 'accepted' ? `${code}: príjem od zákazníka je už potvrdený.` : `${code} · skontroluj číslo a potvrď príjem od zákazníka.`, this.dropoff.state === 'accepted' ? 'success' : '');
+  }
+
+  renderDropoff(panel) {
+    if (!this.dropoff) { panel.append(el('p', 'Naskenuj celý kód balíka od zákazníka.', 'empty-state')); return; }
+    const attempt = this.dropoff;
+    const local = this.parcel(attempt.number) || attempt.local || { number: attempt.number, sender_name: '', carrier_status: 'unconfirmed', location_id: null };
+    const card = this.parcelCard(attempt.state === 'accepted' && !isTerminal(local) ? { ...local, carrier_status: 'accepted', pending_operation: null } : local, { actions: false, showExpiry: false }); card.id = 'dropoff-parcel'; card.classList.add('dropoff-card');
+    const accepted = attempt.state === 'accepted', uncertain = attempt.state === 'uncertain';
+    const message = accepted ? '✓ Príjem od zákazníka je potvrdený v SPS.'
+      : uncertain ? 'Výsledok príjmu nie je známy. Najprv ho over v SPS.'
+      : attempt.state === 'sending' ? 'Potvrdzujem príjem od zákazníka…'
+      : attempt.message || 'Balík je načítaný. Príjem do SPS ešte nie je potvrdený.';
+    const status = el('p', message, accepted ? 'verified-note' : uncertain ? 'warning-note' : ['rejected', 'blocked'].includes(attempt.state) ? 'error-text' : 'muted'); status.id = 'dropoff-status'; status.setAttribute('role', 'status'); card.append(status);
+    if (accepted) {
+      const intake = parcelIntakeTime(local); if (intake) card.append(el('p', `${intake.label}: ${this.formatTime(intake.value)}`, 'muted'));
+      card.append(el('p', 'Môžeš načítať ďalší balík.', 'muted'));
+    }
+    const actions = el('div', '', 'inline-actions');
+    if (local.version) actions.append(button('História', () => this.history(attempt.number)));
+    if (uncertain) {
+      actions.append(button('Overiť stav v evidencii', async () => {
+        if (this.busy) return;
+        this.busy = true; this.renderReceipt(); this.render();
+        try { await this.refresh(); }
+        catch (error) { this.notice(`Evidenciu sa nepodarilo obnoviť. Príjem zatiaľ neopakuj. ${error.message}`, 'error'); }
+        finally { this.busy = false; this.render(); this.renderReceipt(); }
+      }));
+      if (local.pending_operation || local.carrier_status?.endsWith('_uncertain')) actions.append(button('Overiť výsledok v SPS', () => this.resolveOperation(local)));
+    }
+    if (actions.childElementCount) card.append(actions);
+    const submit = button(accepted ? 'Príjem potvrdený' : uncertain ? 'Najprv over výsledok' : attempt.state === 'sending' ? 'Potvrdzujem príjem…' : attempt.controlledRetry ? 'Zopakovať kontrolovaný pokus' : 'Potvrdiť príjem od zákazníka', () => this.confirmDropoff(), 'primary full');
+    submit.id = 'dropoff-confirm'; submit.disabled = this.busy || !['ready', 'rejected'].includes(attempt.state); card.append(submit); panel.append(card);
+  }
+
+  async confirmDropoff() {
+    const attempt = this.dropoff;
+    if (!attempt || this.busy || !['ready', 'rejected'].includes(attempt.state)) return;
+    this.stopInput(); this.busy = true; attempt.state = 'sending'; attempt.operationId ||= operationId(); attempt.message = ''; this.render(); this.renderReceipt();
+    let confirmed = false;
+    try {
+      const result = await this.api('dropoff/confirm', { number: attempt.number, operation_id: attempt.operationId, scanned: true });
+      if (result.accepted !== true) { const error = new Error('Server nepotvrdil výsledok príjmu. Najprv ho over v SPS.'); error.outcome = 'uncertain'; throw error; }
+      confirmed = true; attempt.state = 'accepted'; attempt.controlledRetry = false; this.rememberParcel(result.parcel); attempt.local = result.parcel || attempt.local;
+      this.beep('match'); this.feedback(`✓ ${attempt.number}: príjem od zákazníka potvrdený v SPS.`, 'success');
+      this.notice(result.local_saved === false ? 'SPS príjem potvrdilo. Lokálnu evidenciu treba obnoviť; príjem neopakuj.' : '', result.local_saved === false ? 'warning' : '');
+      await this.refresh();
+    } catch (error) {
+      if (confirmed) this.notice(`SPS príjem ${attempt.number} potvrdilo. Evidenciu sa nepodarilo obnoviť; príjem neopakuj. ${error.message}`, 'warning');
+      else if (error.outcome === 'uncertain' || error.name === 'TypeError' || error.status >= 500) {
+        attempt.state = 'uncertain'; attempt.message = error.message;
+        try { await this.refresh(); }
+        catch { this.notice('Spojenie sa prerušilo a výsledok sa nepodarilo overiť. Obnov evidenciu po návrate spojenia.', 'error'); }
+      } else {
+        attempt.state = 'rejected'; attempt.operationId = null; attempt.controlledRetry = false; attempt.message = error.message; this.beep('unknown');
+        if (error.status === 409) await this.refresh().catch(() => {});
+      }
+    } finally { this.busy = false; this.render(); this.renderReceipt(); }
   }
 
   async loadReturns() {

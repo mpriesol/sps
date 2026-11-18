@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chooseCourier, handoverEligible, handoverGroups, reconcilePickupAttempt, reconcileReceiptItem, routeWarehouseScan, restoreDraft, serializeDraft, suffixCollisions, warehouseVoiceContext } from './warehouse-domain.js';
+import { canConfirmPickup, chooseCourier, handoverEligible, handoverGroups, parcelIntakeTime, reconcileDropoffAttempt, reconcilePickupAttempt, reconcileReceiptItem, routeWarehouseScan, restoreDraft, serializeDraft, suffixCollisions, validDropoffCode, warehouseVoiceContext } from './warehouse-domain.js';
 
 test('last courier and explicit batch choice survive list order changes; missing saved courier is never silently replaced', () => {
   const response = { couriers: [{ id: 1 }, { id: 2 }], suggested: 2, first_id: 1 };
@@ -71,7 +71,7 @@ test('voice ambiguity considers all physical parcels even in inventory or select
 });
 
 test('voice pickup requires the full code and context key changes with target, photos and view', () => {
-  const workspace = voiceWorkspace({ view: 'pickup', pickup: { lookup_id: 'one', parcel: { trackNumber: 'SHELF01' } } });
+  const workspace = voiceWorkspace({ view: 'pickup', settings: { pickup_scan_required: true }, pickup: { lookup_id: 'one', parcel: { trackNumber: 'SHELF01' } } });
   const initial = warehouseVoiceContext(workspace);
   assert.equal(initial.requireFullCode, true);
   assert.equal(initial.allowLocationNames, false);
@@ -82,6 +82,43 @@ test('voice pickup requires the full code and context key changes with target, p
   assert.equal(warehouseVoiceContext({ ...workspace, pickup: null }).enabled, false);
   assert.equal(warehouseVoiceContext({ ...workspace, pickup: { ...workspace.pickup, uncertain: true } }).enabled, false);
   assert.equal(warehouseVoiceContext({ ...workspace, photoBusy: true }).enabled, false);
+  const optional = warehouseVoiceContext({ ...workspace, settings: {} });
+  assert.equal(optional.enabled, false);
+  assert.notEqual(optional.key, initial.key);
+});
+
+test('pickup skips the optional scan only, while cash and uncertain/stale outcomes still block release', () => {
+  const pickup = { parcel: { trackNumber: 'SHELF01', cod: 0 }, verified: false };
+  assert.equal(canConfirmPickup(pickup), true);
+  assert.equal(canConfirmPickup(pickup, true), false);
+  assert.equal(canConfirmPickup({ ...pickup, verified: true }, true), true);
+  const cash = { ...pickup, parcel: { ...pickup.parcel, cod: 12.50 } };
+  assert.equal(canConfirmPickup(cash), false);
+  assert.equal(canConfirmPickup({ ...cash, codConfirmed: true }), true);
+  for (const change of [{ uncertain: true }, { detailsStale: true }]) assert.equal(canConfirmPickup({ ...cash, codConfirmed: true, ...change }), false);
+  assert.equal(canConfirmPickup({ ...pickup, parcel: { ...pickup.parcel, cod: 'invalid' } }), false);
+  assert.equal(canConfirmPickup({ ...pickup, parcel: { ...pickup.parcel, cod: -1 } }), false);
+  assert.equal(canConfirmPickup(null), false);
+});
+
+test('pickup intake time uses explicit receipt or scan events, never import or SPS refresh timestamps', () => {
+  const imported = { created_at: '2026-11-18T10:00:00Z', expiry_synced_at: '2026-11-18T11:00:00Z', received_at: null, scanned_at: null };
+  assert.equal(parcelIntakeTime(imported), null);
+  assert.deepEqual(parcelIntakeTime({ ...imported, scanned_at: '2026-11-17T09:00:00Z' }), { label: 'Naskenované', value: '2026-11-17T09:00:00Z' });
+  assert.deepEqual(parcelIntakeTime({ ...imported, received_at: '2026-11-17T10:00:00Z', scanned_at: '2026-11-17T09:00:00Z' }), { label: 'Prijaté', value: '2026-11-17T10:00:00Z' });
+});
+
+test('customer drop-off takes a whole new code without accepting shelf barcodes or short suffixes', () => {
+  assert.equal(validDropoffCode('0000123456789'), true);
+  assert.equal(validDropoffCode('DEMODROPOFF01'), true);
+  for (const code of ['01', 'ABC12', 'LOC-ABC123', 'LOC:ABC123', 'ABC/123', 'A'.repeat(101)]) assert.equal(validDropoffCode(code), false);
+  const workspace = voiceWorkspace({ view: 'dropoff', state: { shipments: new Map(), selected: new Map(), finished: true } });
+  const context = warehouseVoiceContext(workspace);
+  assert.equal(context.enabled, true);
+  assert.equal(context.requireFullCode, true);
+  assert.equal(context.allowUnknownFullCode, true);
+  assert.equal(context.allowLocationNames, false);
+  assert.notEqual(warehouseVoiceContext({ ...workspace, dropoff: { number: 'DEMODROPOFF01', state: 'ready' } }).key, context.key);
 });
 
 test('storage voice includes explicit location names and refreshes keys when a collision appears', () => {
@@ -141,4 +178,27 @@ test('pickup retry preserves original operation ID and stays blocked without aut
   for (const local of [undefined, { carrier_status: 'accepted', pending_operation: { kind: 'deliver', outcome: 'pending' } }, { carrier_status: 'delivery_uncertain' }, { carrier_status: 'returned' }]) {
     assert.equal(reconcilePickupAttempt(attempt, local).kind, 'blocked');
   }
+});
+
+test('customer intake recovery trusts confirmed journal, not imported accepted/outgoing status', () => {
+  const attempt = { number: 'DEMODROPOFF01', state: 'uncertain', operationId: 'original-dropoff' };
+  const imported = { number: attempt.number, carrier_status: 'accepted', carrier_data: { handoverKind: 'outgoing' }, dropoff_confirmed: false };
+  assert.equal(reconcileDropoffAttempt(attempt, imported).state, 'uncertain');
+  assert.equal(reconcileDropoffAttempt({ ...attempt, state: 'ready' }, imported).state, 'blocked');
+  const confirmed = reconcileDropoffAttempt(attempt, { ...imported, dropoff_confirmed: true });
+  assert.equal(confirmed.state, 'accepted');
+  assert.equal(confirmed.operationId, attempt.operationId);
+  assert.equal(reconcileDropoffAttempt({ ...attempt, state: 'accepted' }, undefined).state, 'accepted');
+  for (const local of [undefined, { carrier_status: 'unconfirmed', pending_operation: null }]) {
+    const retry = reconcileDropoffAttempt(attempt, local);
+    assert.equal(retry.state, 'ready');
+    assert.equal(retry.controlledRetry, true);
+    assert.equal(retry.operationId, attempt.operationId);
+  }
+  for (const local of [{ carrier_status: 'dropoff_uncertain' }, { carrier_status: 'accepted', pending_operation: { kind: 'return', operation_id: 'another-operation' } }, { carrier_status: 'returned' }]) {
+    assert.equal(reconcileDropoffAttempt(attempt, local).state, 'uncertain');
+  }
+  const pending = reconcileDropoffAttempt({ number: attempt.number, state: 'ready' }, { carrier_status: 'unconfirmed', pending_operation: { kind: 'dropoff', operation_id: 'server-operation' } });
+  assert.equal(pending.state, 'uncertain');
+  assert.equal(pending.operationId, 'server-operation');
 });

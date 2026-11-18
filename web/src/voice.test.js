@@ -62,6 +62,23 @@ test('pickup requires every character even if the expected parcel has a unique s
   assert.equal(matchSpokenFullCode('deväť deväť', candidates).kind, 'unknown');
 });
 
+test('new customer dropoff accepts a complete unknown tracking code without inventing missing characters', () => {
+  const candidates = new Map([['DEMO123456', {}]]), options = { allowUnknown: true };
+  assert.deepEqual(matchSpokenFullCode('nula nula jedna dva tri štyri', candidates, new Map(), options), { kind: 'match', code: '001234', suffix: '001234' });
+  assert.equal(matchSpokenFullCode('NEW-001234', candidates, new Map(), options).code, 'NEW-001234');
+  assert.equal(matchSpokenFullCode('nula jedna', candidates, new Map(), options).kind, 'incomplete');
+  assert.equal(matchSpokenFullCode('123456', candidates, new Map(), options).kind, 'incomplete', 'a known suffix is never expanded or treated as its own new parcel');
+  assert.equal(matchSpokenFullCode('DEMO123456', candidates, new Map(), options).code, 'DEMO123456');
+  assert.equal(matchSpokenFullCode('001234', candidates).kind, 'unknown', 'unknown IDs remain forbidden for pickup');
+});
+
+test('dropoff full-code intent rejects locations, unsafe input and ordinary speech', () => {
+  const match = transcript => matchSpokenFullCode(transcript, new Map(), new Map(), { allowUnknown: true });
+  for (const phrase of ['LOC-ABC123', 'ahojte', 'asi balík 123456', 'ABC/123456', 'A'.repeat(101) + '1']) assert.equal(match(phrase).kind, 'invalid', phrase);
+  assert.equal(match('nula nula nula nula nula').kind, 'incomplete');
+  assert.equal(match('á bé cé dé é ef').code, 'ABCDEF', 'explicit spelling may contain letters only');
+});
+
 test('location voice uses an explicit prefix and a unique complete name', () => {
   const locations = [{ name: 'A1', barcode: 'LOC-ONE' }, { name: 'Horná polica', barcode: 'LOC-TWO' }];
   assert.equal(matchSpokenLocation('á jedna', locations), null, 'unprefixed speech remains a parcel suffix');
