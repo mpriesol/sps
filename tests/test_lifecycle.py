@@ -472,3 +472,78 @@ def test_courier_preference_updates_only_on_success_and_missing_last_requires_ch
     assert missing["suggested"] is None and missing["requires_selection"] is True
     assert warehouse.get_settings()["last_courier_id"] == "2"
     assert accept(client, headers, "DEMO00000002", courier_id=2).status_code == 422
+
+
+def test_courier_queue_separates_customer_dropoffs_from_expired_returns(workflow):
+    client, demo, warehouse, _ = workflow
+    response = client.get(PREFIX + "returns")
+    assert response.status_code == 200
+    data = response.json()
+    assert {p['trackNumber'] for p in data['outgoing']} == {'DEMOOUTGOING01', 'DEMOOUTGOING02', 'DEMOOUTBLOCKED03'}
+    assert {p['trackNumber'] for p in data['returns']} == {'DEMOEXPIRED01', 'DEMOBLOCKED01'}
+    assert data['unclassified'] == []
+    outgoing = warehouse.get_parcel('DEMOOUTGOING01')
+    assert outgoing['carrier_status'] == 'accepted'
+    assert outgoing['expires_at'] is None
+    assert outgoing['carrier_data']['handoverKind'] == 'outgoing'
+    assert demo.returns == [] and demo.acceptances == []
+
+
+def test_manual_mixed_selection_can_handover_outgoing_and_expired_without_registration_or_scan_gate(workflow):
+    client, demo, warehouse, headers = workflow
+    for number in ['DEMOOUTGOING01', 'DEMOEXPIRED01']:
+        place(warehouse, number, rack=number)
+    prepared = client.post(PREFIX + 'returns/couriers', json={'numbers': ['DEMOOUTGOING01', 'DEMOEXPIRED01']}, headers=headers)
+    assert prepared.status_code == 200
+    assert demo.acceptances == [] and demo.returns == []
+    for number, kind in [('DEMOOUTGOING01', 'outgoing'), ('DEMOEXPIRED01', 'return')]:
+        response = return_parcel(client, headers, number)
+        assert response.status_code == 200, response.text
+        assert response.json()['handover_kind'] == kind
+        parcel = warehouse.get_parcel(number)
+        assert parcel['carrier_status'] == 'returned' and parcel['location_id'] is None
+        event = next(e for e in warehouse.history(number) if e['type'] == 'carrier_returned')
+        assert event['details']['handover_kind'] == kind
+    assert demo.returns == [('DEMOOUTGOING01', 1), ('DEMOEXPIRED01', 1)]
+    assert demo.acceptances == []
+    assert return_parcel(client, headers, 'DEMOOUTGOING01').json()['already_returned'] is True
+    assert len(demo.returns) == 2
+
+
+@pytest.mark.parametrize('number', ['DEMOOUTBLOCKED03', 'CUSTOMER_NOT_REGISTERED'])
+def test_blocked_or_only_locally_registered_outgoing_cannot_become_eligible(workflow, number):
+    client, demo, warehouse, headers = workflow
+    warehouse.register_parcel(number)
+    place(warehouse, number)
+    response = client.post(PREFIX + 'returns/couriers', json={'numbers': [number]}, headers=headers)
+    assert response.status_code == 409
+    assert return_parcel(client, headers, number).status_code == 409
+    assert demo.returns == []
+    assert warehouse.get_parcel(number)['location_id'] is not None
+
+
+def test_outgoing_eligibility_is_rechecked_and_uncertain_handover_preserves_location(workflow):
+    client, demo, warehouse, headers = workflow
+    place(warehouse, 'DEMOOUTGOING01')
+    prepare_return(client, headers, 'DEMOOUTGOING01')
+    demo.parcels['DEMOOUTGOING01']['returnEligible'] = False
+    assert return_parcel(client, headers, 'DEMOOUTGOING01').status_code == 409
+    assert demo.returns == []
+    demo.parcels['DEMOOUTGOING01']['returnEligible'] = True
+    demo.return_error = OperationUncertainError('Nejasné odovzdanie')
+    first = return_parcel(client, headers, 'DEMOOUTGOING01')
+    assert first.status_code == 502 and first.json()['outcome'] == 'uncertain'
+    assert warehouse.get_parcel('DEMOOUTGOING01')['carrier_status'] == 'return_uncertain'
+    assert warehouse.get_parcel('DEMOOUTGOING01')['location_id'] is not None
+    assert return_parcel(client, headers, 'DEMOOUTGOING01').status_code == 409
+    assert demo.returns == [('DEMOOUTGOING01', 1)]
+
+
+def test_unknown_carrier_type_is_visible_as_unknown_without_altering_eligibility(workflow):
+    client, demo, _, headers = workflow
+    demo.parcels['DEMOEXPIRED01']['handoverKind'] = 'unknown'
+    response = client.get(PREFIX + 'returns')
+    assert response.status_code == 200
+    assert [p['trackNumber'] for p in response.json()['unclassified']] == ['DEMOEXPIRED01']
+    prepare_return(client, headers, 'DEMOEXPIRED01')
+    assert return_parcel(client, headers, 'DEMOEXPIRED01').status_code == 200

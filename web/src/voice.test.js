@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spokenSuffix, matchSpokenSuffix, VoiceInput } from './voice.js';
+import { spokenSuffix, matchSpokenSuffix, matchSpokenFullCode, matchSpokenLocation, VoiceInput } from './voice.js';
 
 test('Slovak letter names and recognizer-formatted acronyms resolve to MP3', () => {
   for (const phrase of ['em pé tri', 'em pe tri', 'ém, pé, 3.', 'M P 3', 'MP3', 'mp tri', 'em P3']) {
@@ -50,6 +50,25 @@ test('two characters are sufficient; a third disambiguates without truncation', 
   assert.equal(matchSpokenSuffix('osem sedem', shipments, new Map()).code, 'SPS00387');
   assert.deepEqual(matchSpokenSuffix('pé tri', shipments, new Map()), { kind: 'ambiguous', suffix: 'P3', count: 2 });
   assert.equal(matchSpokenSuffix('em pé tri', shipments, new Map()).code, 'SPS2MP3');
+});
+
+test('pickup requires every character even if the expected parcel has a unique suffix', () => {
+  const candidates = new Map([['00MP3', {}], ['OTHER09', {}]]);
+  assert.equal(matchSpokenFullCode('em pé tri', candidates).kind, 'incomplete');
+  assert.equal(matchSpokenFullCode('nula em pé tri', candidates).kind, 'incomplete');
+  assert.equal(matchSpokenFullCode('nula nula em pé tri', candidates).code, '00MP3');
+  assert.equal(matchSpokenFullCode('00mp3', candidates).code, '00MP3');
+  assert.equal(matchSpokenFullCode('other09', candidates).code, 'OTHER09', 'wrong physical parcel remains its own full ID for verification');
+  assert.equal(matchSpokenFullCode('deväť deväť', candidates).kind, 'unknown');
+});
+
+test('location voice uses an explicit prefix and a unique complete name', () => {
+  const locations = [{ name: 'A1', barcode: 'LOC-ONE' }, { name: 'Horná polica', barcode: 'LOC-TWO' }];
+  assert.equal(matchSpokenLocation('á jedna', locations), null, 'unprefixed speech remains a parcel suffix');
+  assert.equal(matchSpokenLocation('miesto á jedna', locations).code, 'LOC-ONE');
+  assert.equal(matchSpokenLocation('polica Horná polica', locations).code, 'LOC-TWO');
+  assert.equal(matchSpokenLocation('miesto Horná', locations).kind, 'unknown', 'partial name is insufficient');
+  assert.equal(matchSpokenLocation('miesto A1', [...locations, { name: 'A1', barcode: 'LOC-THREE' }]).kind, 'ambiguous');
 });
 
 class Recognition {
@@ -143,4 +162,35 @@ test('spoken prompts suspend recognition without leaving hands-free mode', t => 
   voice.resume();
   t.mock.timers.tick(1000);
   assert.equal(voice.recognition, null);
+});
+
+test('a late result from another view is discarded and recognition restarts in the current context', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let context = 'receipt:parcel-A'; const heard = [];
+  const voice = new VoiceInput({ Recognition, getContextKey: () => context,
+    onTranscript: (transcript, key) => heard.push([transcript, key]), onState() {}, onError() {} });
+  voice.start(); const receiptRecognition = voice.recognition;
+  context = 'store:parcel-B';
+  receiptRecognition.result('em pé tri');
+  assert.deepEqual(heard, []);
+  assert.equal(receiptRecognition.aborted, true);
+  assert.equal(voice.active, true);
+  t.mock.timers.tick(350);
+  voice.recognition.result('nula sedem');
+  assert.deepEqual(heard, [['nula sedem', 'store:parcel-B']]);
+  receiptRecognition.result('deväť deväť');
+  assert.equal(heard.length, 1);
+  voice.stop();
+});
+
+test('multiple final results cannot cross a context change triggered by the first result', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let context = 'store:before'; const heard = [];
+  const voice = new VoiceInput({ Recognition, getContextKey: () => context,
+    onTranscript: transcript => { heard.push(transcript); context = 'store:after'; }, onState() {}, onError() {} });
+  voice.start();
+  const results = ['nula jedna', 'miesto á jedna'].map(transcript => Object.assign([{ transcript }], { isFinal: true }));
+  voice.recognition.onresult({ resultIndex: 0, results });
+  assert.deepEqual(heard, ['nula jedna']);
+  voice.stop();
 });

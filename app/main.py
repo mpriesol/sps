@@ -199,6 +199,15 @@ def create_app(settings=None, sps=None, static_dir=None):
     async def saved_couriers():
         return {"couriers": passwords.couriers()}
 
+    @app.post("/api/courier-passwords/reveal")
+    async def reveal_courier(body: CourierBody):
+        # Reveal only the selected saved entry after an explicit authenticated,
+        # same-origin, CSRF-protected request. Lists never include credentials.
+        password = passwords.password(body.courier_id)
+        if password is None:
+            raise HTTPException(404, "Pre tohto kuriéra nie je uložené heslo.")
+        return {"password": password}
+
     @app.post("/api/courier-passwords/save")
     async def save_courier(request: Request, body: CourierPasswordBody):
         choices = {str(c["id"]): c for c in passwords.couriers()}

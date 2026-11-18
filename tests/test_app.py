@@ -198,6 +198,69 @@ def test_failed_manual_password_is_not_remembered(setup):
     assert client.get('/sps/api/courier-passwords').json()['couriers'] == []
 
 
+def test_password_reveal_requires_login_same_origin_and_valid_csrf(setup):
+    client, _ = setup
+    reveal = '/sps/api/courier-passwords/reveal'
+    body = {'courier_id': 7}
+    assert client.post(reveal, json=body, headers=HEADERS).status_code == 401
+    headers = login(client)
+    prepare(client, headers)
+    client.post('/sps/api/courier-passwords/save', json={**body, 'password': 'explicit-reveal-secret'}, headers=headers)
+    for invalid_headers in (HEADERS, {**headers, 'X-CSRF-Token': 'wrong'}, {**headers, 'Origin': 'https://another.example'}, {**headers, 'X-Requested-With': ''}):
+        response = client.post(reveal, json=body, headers=invalid_headers)
+        assert response.status_code == 403
+        assert 'explicit-reveal-secret' not in response.text
+        assert response.headers['cache-control'] == 'no-store'
+    assert client.get(reveal).status_code == 405
+    client.post('/sps/api/logout', json={}, headers=headers)
+    assert client.post(reveal, json=body, headers=headers).status_code == 401
+
+
+def test_reveal_returns_only_selected_saved_password_and_remove_keeps_sps_courier(setup):
+    client, fake = setup
+    async def choices(numbers):
+        return [{'id': 7, 'code': 'TEST7', 'name': 'First'}, {'id': 8, 'code': 'TEST8', 'name': 'Second'}]
+    fake.couriers = choices
+    headers = login(client)
+    prepare(client, headers)
+    reveal = '/sps/api/courier-passwords/reveal'
+    for courier_id, password in ((7, 'first-saved-secret'), (8, 'second-saved-secret')):
+        response = client.post('/sps/api/courier-passwords/save', json={'courier_id': courier_id, 'password': password}, headers=headers)
+        assert response.status_code == 200
+    response = client.post(reveal, json={'courier_id': '7'}, headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {'password': 'first-saved-secret'}
+    assert 'second-saved-secret' not in response.text
+    assert response.headers['cache-control'] == 'no-store'
+    saved = client.get('/sps/api/courier-passwords')
+    assert len(saved.json()['couriers']) == 2
+    assert all(set(row) == {'id', 'code', 'name'} for row in saved.json()['couriers'])
+    assert 'first-saved-secret' not in saved.text and 'second-saved-secret' not in saved.text
+    missing = client.post(reveal, json={'courier_id': 999}, headers=headers)
+    assert missing.status_code == 404 and set(missing.json()) == {'detail'}
+    assert client.post('/sps/api/courier-passwords/remove', json={'courier_id': 7}, headers=headers).status_code == 200
+    assert client.post(reveal, json={'courier_id': 7}, headers=headers).status_code == 404
+    assert client.post(reveal, json={'courier_id': 8}, headers=headers).json() == {'password': 'second-saved-secret'}
+    current = client.post('/sps/api/couriers', json={'numbers': ['JJD00001']}, headers=headers).json()['couriers']
+    assert [courier['id'] for courier in current] == [7, 8]
+    assert [courier['has_password'] for courier in current] == [False, True]
+    assert fake.accepted == []
+
+
+def test_receipt_placement_preference_is_shared_between_active_sessions(setup):
+    client, _ = setup
+    first_headers = login(client)
+    first_cookie = client.cookies.get('sps_receiving_session')
+    first_headers = {**first_headers, 'Cookie': f'sps_receiving_session={first_cookie}'}
+    second_headers = login(client)
+    assert client.get('/sps/api/warehouse').json()['settings']['receipt_place'] is False
+    saved = client.post('/sps/api/settings', json={'receipt_place': True}, headers=first_headers)
+    assert saved.status_code == 200 and saved.json()['settings']['receipt_place'] is True
+    assert client.get('/sps/api/warehouse').json()['settings']['receipt_place'] is True
+    assert client.post('/sps/api/settings', json={'receipt_place': False}, headers=second_headers).status_code == 200
+    assert client.get('/sps/api/warehouse', headers=first_headers).json()['settings']['receipt_place'] is False
+
+
 def test_saving_password_does_not_accept_any_parcel(setup):
     client, fake = setup
     headers = login(client)

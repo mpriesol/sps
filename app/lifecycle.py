@@ -210,10 +210,15 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
     @app.get("/api/returns")
     async def returns():
         require("returns")
+        # SPS calls this endpoint "expired", but the official courier-handover
+        # screen uses it for customer drop-offs as well as expired/other returns.
         rows = await client.expired_shipments()
         warehouse.sync_carrier_parcels(rows)
         result = [{**row, "local": warehouse.get_parcel(row["trackNumber"])} for row in rows]
-        return {"parcels": result, "synced_at": datetime.now(timezone.utc).isoformat()}
+        return {"parcels": result, "synced_at": datetime.now(timezone.utc).isoformat(),
+                "outgoing": [p for p in result if p.get("handoverKind") == "outgoing"],
+                "returns": [p for p in result if p.get("handoverKind") == "return"],
+                "unclassified": [p for p in result if p.get("handoverKind") not in {"outgoing", "return"}]}
 
     @app.post("/api/returns/couriers")
     async def return_couriers(request: Request, body: ReturnNumbers):
@@ -222,7 +227,7 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         numbers = list(dict.fromkeys(parcel_number(n) for n in body.numbers))
         eligible = {p["trackNumber"] for p in await client.expired_shipments() if p["returnEligible"]}
         if any(n not in eligible for n in numbers):
-            raise HTTPException(409, "Niektorý balík už SPS nepovoľuje vrátiť. Obnovte zoznam expirovaných zásielok.")
+            raise HTTPException(409, "Niektorý balík už SPS nepovoľuje odovzdať kuriérovi. Obnovte zoznam na výdaj kuriérovi.")
         choices = await client.couriers(numbers)
         session["return_numbers"] = set(numbers)
         session["return_couriers"] = {str(c["id"]): c for c in choices}
@@ -240,7 +245,7 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
         if local and local["carrier_status"] == "returned":
             return {"returned": True, "number": number, "already_returned": True}
         if local and local["carrier_status"] != "accepted":
-            raise HTTPException(409, "Balík nie je pripravený na vrátenie alebo čaká na overenie výsledku v SPS.")
+            raise HTTPException(409, "Balík nie je pripravený na odovzdanie alebo čaká na overenie výsledku v SPS.")
         current = next((p for p in await client.expired_shipments() if p["trackNumber"] == number), None)
         if current is None or not current["returnEligible"]:
             raise HTTPException(409, "SPS už tento balík nepovoľuje odovzdať kuriérovi. Obnovte zoznam.")
@@ -250,8 +255,10 @@ def install_lifecycle_routes(app, client, warehouse, session_for, passwords, cou
             raise CourierCredentialsError("Pre tohto kuriéra ešte nie je uložené heslo. Zadajte ho.")
         result = await perform(number, "return", body.operation_id, session["actor"],
                                lambda: client.return_parcel(number, courier["id"], password), "returned",
-                               {"courier_id": str(courier["id"]), "courier_name": courier["name"]})
-        result.update({"returned": True, "number": number, "password_saved": True})
+                               {"courier_id": str(courier["id"]), "courier_name": courier["name"],
+                                "handover_kind": current.get("handoverKind", "unknown")})
+        result.update({"returned": True, "number": number, "password_saved": True,
+                       "handover_kind": current.get("handoverKind", "unknown")})
         if body.password is not None:
             try:
                 passwords.save(courier, password)

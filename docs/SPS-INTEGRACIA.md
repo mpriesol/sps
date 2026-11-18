@@ -1,6 +1,6 @@
 # SPS integračné poznámky
 
-Príjem bol preskúmaný 22. 10. 2026. Rozšírenie o sklad, vyhľadanie podľa PIN-u, výdaj, vratky a doklady bolo overené **17. 11. 2026 vo verejnom klientskom kóde portálu** `https://ps.sps-sro.sk/`. Aktuálna stránka stále odkazovala na balík `https://ps.sps-sro.sk/main.f1da756c6e8e064d.js`, UI verzia 4.9.29. Pri tomto overení sa nepoužilo prihlásenie ani nevykonal príjem, výdaj, platba alebo vrátenie reálnej zásielky. Ide o overenie kontraktu klienta; produkčné odpovede nových operácií ešte treba potvrdiť pri riadenom nasadení.
+Príjem bol preskúmaný 22. 10. 2026. Rozšírenie o sklad, vyhľadanie podľa PIN-u, výdaj, vratky a doklady bolo overené 17. 11. 2026 vo verejnom klientskom kóde portálu `https://ps.sps-sro.sk/`. **18. 11. 2026** bola znovu načítaná aktuálna úvodná stránka aj jej klientsky balík a overený spoločný výdaj zákazníckych podaní a vratiek kuriérovi. Stránka stále odkazovala na `https://ps.sps-sro.sk/main.f1da756c6e8e064d.js`, UI verzia 4.9.29; SHA-256 súboru je `cf17967dfc2cb82dad4152776241a8e7b9fb2ee56cb07da8124389f52014371d`. Pri overení sa nepoužilo prihlásenie ani nevykonal príjem, výdaj, platba alebo vrátenie reálnej zásielky. Ide o overenie kontraktu klienta; produkčné odpovede nových operácií ešte treba potvrdiť pri riadenom nasadení.
 
 Základ API: `https://ps.sps-sro.sk/psappserver/rest`.
 
@@ -14,8 +14,9 @@ Základ API: `https://ps.sps-sro.sk/psappserver/rest`.
 | Uložené zásielky | `GET /getStoredShipments` | query `trackNumber` (prázdny pre celý zoznam) |
 | Vyhľadanie podľa PIN-u | `GET /getShipmentDetails` | query `smsKey`, `logInfo=false` |
 | Výdaj zákazníkovi | `PUT /shipmentDelivery` | `smsKey`, `state:40`, `codConfirmed`, `paidWithPaymentTerminal` |
-| Zásielky na vrátenie | `GET /shipment/expired` | session cookies |
+| Celý zoznam na výdaj kuriérovi (podania aj vratky) | `GET /shipment/expired` | session cookies |
 | Odovzdanie kuriérovi | `PUT /shipment/return` | `trackNumber`, `courierId`, `password` |
+| Katalóg typov udalostí, voliteľné doplnenie rozdelenia | `GET /events` | `code`, `droppoff`, `shouldReturnToCourier`; oprávnenia závisia od účtu |
 | Hash na stiahnutie dokladu | `POST /hash` | `{"text":"číslo zásielky"}` → `{"hash":"…"}` |
 | PDF doklad | `GET /getreceiptdocuments` | query `trackNumber`, `hash`, `updateReceiptNumber` |
 
@@ -35,7 +36,15 @@ Mobilný prehliadač volá iba vlastný server, nie priamo doménu SPS. Server d
 
 `getShipmentDetails` vracia jeden objekt alebo `null`; portál ho hľadá cez `smsKey`, nie cez telefónne číslo. Lookup číta `trackNumber`, `cod`, `recipientName`, `senderName` a `psRemark`. Adaptér neukladá ani nevracia PIN, telefón či e-mail príjemcu. Neplatná alebo chýbajúca suma `cod` pri výdajnom lookupe zastaví operáciu. Celé číslo zásielky sa pred potvrdením musí porovnať s vyhľadanou aj fyzicky naskenovanou zásielkou. Dvojznakový koniec čísla slúži iba ako vizuálna pomôcka.
 
-`shipment/expired` je autoritatívny zoznam na vrátenie a môže obsahovať aj iné prevádzkové prípady než obyčajnú časovú expiráciu. Portál číta `status.code`, `statusDate`, `entryCourier`, `trackNumber` a `senderName`. **Stav 5555 nesmie ísť priamo do odovzdania**: pôvodný portál ho blokuje a ponúka osobitnú administrátorskú opravu. Adaptér preto vracia `returnEligible=false`; aplikácia nemá obchádzať túto podmienku. Pre ostatné položky zoznamu vracia `returnEligible=true`. Samotná príprava vratky ani jej presun na policu nemení stav v SPS; to robí až explicitné `PUT /shipment/return`.
+`shipment/expired` je napriek názvu autoritatívny zoznam obrazovky **Výdaj kuriérovi**. Používa sa aj pre balíky podané zákazníkmi, ktoré má prevziať kuriér. Trieda klienta `Aue` načítava celý tento zoznam a odovzdáva vybrané zásielky cez rovnaké `PUT /shipment/return`; samostatný domyslený endpoint na odosielané balíky sa nepoužíva. Portál číta `status.code`, `statusDate`, `entryCourier`, `trackNumber` a `senderName`. **Stav 5555 nesmie ísť priamo do odovzdania**: pôvodný portál ho blokuje a ponúka osobitnú administrátorskú opravu. Adaptér preto vracia `returnEligible=false`; aplikácia nemá obchádzať túto podmienku. Pre ostatné položky tohto autoritatívneho zoznamu vracia `returnEligible=true`. Chýbajúca zásielka, aj keď má lokálny záznam alebo starý dátum expirácie, sa do zoznamu svojvoľne nepridáva.
+
+Rozdelenie obrazovky používa explicitné metadáta udalosti: `droppoff=true` (presný názov v SPS, s dvomi p) označuje zákaznícke podanie; `shouldReturnToCourier=true` označuje vratku, ak nejde o podanie. Samotné `droppoff=false` nestačí na označenie vratky. Klientský editor udalostí `Que` tieto vlastnosti číta a upravuje cez `/events` a zobrazuje ich ako prijatie od zákazníka a vrátenie kuriérovi. Ak kompaktný objekt `status` v zásielke neposkytne všetky príznaky, adaptér môže doplniť metadáta z tohto katalógu podľa **presného `status.code`**, s päťminútovou vyrovnávacou pamäťou. Explicitné booleany priamo pri zásielke majú prednosť; nejednoznačné duplicitné kódy katalógu sa nepoužijú. Zamietnuté oprávnenie, výpadok alebo neúplné metadáta ponechajú typ `unknown`, bez obchádzania oprávnení a bez blokovania celého výdaja.
+
+Zobrazenie ide v poradí **Podané zákazníkmi → Expirované a ďalšie vratky → Ďalšie zásielky podľa SPS**. Posledná skupina otvorene ponecháva neznámy typ; neodvodzuje ho z čísla stavu, názvu či dátumu. Zaradenie do skupiny nemení oprávnenie na odovzdanie. Každý zápis opäť načíta autoritatívny zoznam a overí aktuálnu oprávnenosť vrátane 5555, lokálnych nejasných výsledkov a už dokončených operácií.
+
+Obsluha môže balíky vyberať ťuknutím, skenom celého kódu alebo hlasovou koncovkou, ktorá je jednoznačná medzi všetkými známymi fyzickými balíkmi. Výber všetkých preskočí blokované, už odovzdané a neoverené položky; limit jednej dávky je viditeľne 200 balíkov. Samotný výber, príprava vopred ani presun na policu nemení stav v SPS; to robí až explicitné potvrdenie odovzdania. Pri výdaji zákazníkovi sa aj naďalej overuje **celý** kód balíka, nie skrátená hlasová koncovka.
+
+Prijatie nového podania od zákazníka je iná operácia: trieda `cye` v portáli používa `POST /insertShipmentForDropoff` s `trackNumber`, vyžaduje `parcelshop.supportdropoff` a úspech posudzuje podľa `cargonetAccepted` alebo `cdexAccepted`. Tento nový príjem nie je súčasťou zmeny výdaja kuriérovi. Aplikácia pracuje so zásielkami, ktoré už do zoznamu zaradilo SPS; nepredstiera registráciu zatiaľ neprijatého podania.
 
 ## Dobierka a doklady
 
@@ -63,7 +72,7 @@ Frontend zobrazuje výsledok jednotlivých balíkov a po chybe zastaví dávku. 
 
 ## Demo kontrakt
 
-Demo režim nevykonáva žiadnu sieťovú požiadavku. Dvaja skúšobní kuriéri majú ID `1` a `2`, heslo `demo`. Desať zásielok `DEMO00000001` až `DEMO00000010` čaká na príjem; po prijatí je PIN posledných šesť číslic (`000001` až `000010`). `DEMOSTORED01` je už uložená s PIN-om `111111` a dobierkou 12,50 €. `DEMOEXPIRED01` je pripravená na vrátenie; `DEMOBLOCKED01` demonštruje blokovaný stav 5555. Skúšobný PDF doklad je zreteľne označený DEMO. Údaje simulátora SPS sú v pamäti procesu.
+Demo režim nevykonáva žiadnu sieťovú požiadavku. Dvaja skúšobní kuriéri majú ID `1` a `2`, heslo `demo`. Desať zásielok `DEMO00000001` až `DEMO00000010` čaká na príjem; po prijatí je PIN posledných šesť číslic (`000001` až `000010`). `DEMOSTORED01` je už uložená s PIN-om `111111` a dobierkou 12,50 €. `DEMOOUTGOING01` a `DEMOOUTGOING02` sú už prijaté zákaznícke podania na odovzdanie kuriérovi; nemajú vymyslenú expiráciu. `DEMOOUTBLOCKED03` je podanie blokované stavom 5555. `DEMOEXPIRED01` je pripravená vratka; `DEMOBLOCKED01` demonštruje blokovanú vratku. Skúšobný PDF doklad je zreteľne označený DEMO. Údaje simulátora SPS sú v pamäti procesu.
 
 ## Overenie pred ostrou prevádzkou
 
